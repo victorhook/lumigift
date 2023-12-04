@@ -35,12 +35,12 @@ def reboot():
     return render_template('index.html', message="Hello, World!")
 
 @app.route('/start', methods=['POST'])
-def reboot():
+def start():
     server.start()
     return render_template('index.html', message="Hello, World!")
 
 @app.route('/stop', methods=['POST'])
-def reboot():
+def stop():
     server.start()
     return render_template('index.html', message="Hello, World!")
 
