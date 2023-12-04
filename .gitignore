@@ -4,3 +4,8 @@
 *.kicad_prl
 fp-info-cache
 *.gbrjob
+*.pyc
+env/
+build/
+.pio/
+.vscode/
