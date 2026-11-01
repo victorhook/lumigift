@@ -1,0 +1,18 @@
+[build]
+target = "thumbv6m-none-eabi"
+
+[target.thumbv6m-none-eabi]
+# `cargo run -p lumigift-boot --release` flashes + runs over SWD (ST-Link).
+runner = "probe-rs run --chip STM32C011F6Px"
+# --nmagic: no page-aligned ELF header segment (lld would otherwise emit a
+# LOAD segment at 0x0800_0000 for the app, and flashing the app ELF would
+# clobber the bootloader).
+# -inline-threshold=15: LLVM's opt-level "z" default inlines more than pays
+# off here; 15 saves ~300 B in the bootloader and ~350 B in the app
+# (measured with rustc 1.98; `cargo xtask size` checks the budgets anyway).
+rustflags = ["-C", "link-arg=--nmagic", "-C", "link-arg=-Tlink.x", "-C", "llvm-args=-inline-threshold=15"]
+
+[alias]
+# Host-side tools and tests (the default target above is the MCU).
+xtask = "run --quiet --manifest-path xtask/Cargo.toml --target host-tuple --target-dir target/xtask --"
+test-host = "test -p lumigift-logic --target host-tuple"

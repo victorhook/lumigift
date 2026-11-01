@@ -1,0 +1,9 @@
+[package]
+name = "lumigift-fx"
+description = "Fixed-point LED effect renderer shared by Lumigift firmware and host preview"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+lumigift-proto = { path = "../lumigift-proto" }

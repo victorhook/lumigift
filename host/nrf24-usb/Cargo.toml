@@ -1,0 +1,13 @@
+[package]
+name = "nrf24-usb"
+description = "Host driver for the generic nRF24L01+ USB bridge (nusb, no libusb)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nrf24-usb-proto = { path = "../../crates/nrf24-usb-proto" }
+nusb = "0.2"
+crossbeam-channel = "0.5"
+thiserror = "2"
+log = "0.4"

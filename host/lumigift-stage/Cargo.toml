@@ -1,0 +1,18 @@
+[package]
+name = "lumigift-stage"
+description = "Real-time 3D stage of glowing Lumigift boxes for egui (wgpu)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lumigift-proto = { path = "../../crates/lumigift-proto" }
+eframe = { workspace = true, features = ["wgpu"] }
+egui = { workspace = true }
+bytemuck = { workspace = true }
+glam = { workspace = true }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+# Same naga as wgpu 30 uses; only for validating the WGSL in unit tests.
+naga = { version = "30", features = ["wgsl-in"] }

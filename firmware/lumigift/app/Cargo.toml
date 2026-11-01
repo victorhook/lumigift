@@ -1,0 +1,21 @@
+[package]
+name = "lumigift-app"
+description = "Lumigift gift application (linked at 0x0800_2900)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lumigift-board.workspace = true
+lumigift-logic.workspace = true
+lumigift-proto.workspace = true
+lumigift-fx.workspace = true
+nrf24.workspace = true
+cortex-m.workspace = true
+cortex-m-rt.workspace = true
+stm32-metapac.workspace = true
+
+[[bin]]
+name = "lumigift-app"
+test = false
+bench = false

@@ -1,0 +1,15 @@
+Fonts embedded by lumigift-studio (see docs/UI_DESIGN.md §7.2-7.3).
+
+Inter 4.1 (OFL-1.1)        Inter-{Regular,Medium,SemiBold}.ttf from Inter-4.1.zip extras/ttf/
+Inter Tnum (OFL-1.1)       derived, tabular figures frozen in:
+    pyftfeatfreeze -f tnum -S -U Tnum Inter-Regular.ttf InterTnum-Regular.ttf
+    pyftfeatfreeze -f tnum -S -U Tnum Inter-Medium.ttf  InterTnum-Medium.ttf
+Geist Mono 1.9.0 (OFL-1.1) GeistMono-{Regular,Medium}.ttf from geist-font-v1.9.0.zip GeistMono/ttf/
+Phosphor 2.1.2 (MIT)       @phosphor-icons/web src/{regular/Phosphor.ttf,fill/Phosphor-Fill.ttf},
+                           subset to the codepoints listed in phosphor-icons.txt (name + hex codepoint,
+                           looked up in src/regular/style.css). Subsetting is mandatory: the stock font
+                           maps a-z/space/hyphen for ligatures and would hijack Latin text.
+    U=$(awk '{printf "U+%s,", toupper($2)}' phosphor-icons.txt | sed 's/,$//')
+    pyftsubset Phosphor.ttf      --unicodes="$U" --layout-features='' --no-hinting --output-file=Phosphor.ttf
+    pyftsubset Phosphor-Fill.ttf --unicodes="$U" --layout-features='' --no-hinting --output-file=Phosphor-Fill.ttf
+To add an icon: append "name codepoint" to phosphor-icons.txt, re-run the subset, add a const in src/icons.rs.

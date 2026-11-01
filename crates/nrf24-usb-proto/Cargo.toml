@@ -1,0 +1,8 @@
+[package]
+name = "nrf24-usb-proto"
+description = "Wire protocol between a host and a generic nRF24L01+ USB bridge"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]

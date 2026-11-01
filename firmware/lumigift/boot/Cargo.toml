@@ -1,0 +1,19 @@
+[package]
+name = "lumigift-boot"
+description = "Lumigift radio bootloader (10 KiB at 0x0800_0000)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lumigift-board.workspace = true
+lumigift-logic.workspace = true
+lumigift-proto.workspace = true
+nrf24.workspace = true
+cortex-m.workspace = true
+cortex-m-rt.workspace = true
+
+[[bin]]
+name = "lumigift-boot"
+test = false
+bench = false

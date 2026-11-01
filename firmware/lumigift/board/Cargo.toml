@@ -1,0 +1,20 @@
+[package]
+name = "lumigift-board"
+description = "STM32C011F6 board support for the Lumigift bootloader and app (bare PAC)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lumigift-proto.workspace = true
+lumigift-logic.workspace = true
+nrf24.workspace = true
+embedded-hal.workspace = true
+cortex-m.workspace = true
+cortex-m-rt.workspace = true
+stm32-metapac.workspace = true
+
+[lib]
+test = false
+bench = false
+doctest = false

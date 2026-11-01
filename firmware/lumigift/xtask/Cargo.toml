@@ -1,0 +1,14 @@
+[package]
+name = "xtask"
+description = "Host-side build helper for the Lumigift firmware (OTA image, size report, SWD flashing)"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+publish = false
+
+# Own workspace: the firmware workspace defaults to thumbv6m-none-eabi.
+# Run through the `cargo xtask` alias in ../.cargo/config.toml.
+[workspace]
+
+[dependencies]
+lumigift-proto = { path = "../../../crates/lumigift-proto" }

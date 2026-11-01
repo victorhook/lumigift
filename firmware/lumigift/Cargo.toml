@@ -1,0 +1,45 @@
+# Lumigift gift firmware: radio bootloader + application for the STM32C011F6.
+# Separate cargo workspace (default target thumbv6m-none-eabi, see .cargo/config.toml).
+# Host-side tooling lives in xtask/ (its own workspace, run with `cargo xtask`).
+[workspace]
+resolver = "3"
+members = ["logic", "board", "boot", "app"]
+default-members = ["boot", "app"]
+exclude = ["xtask"]
+
+[workspace.package]
+edition = "2024"
+license = "MIT"
+version = "0.1.0"
+
+[workspace.dependencies]
+lumigift-proto = { path = "../../crates/lumigift-proto" }
+lumigift-fx = { path = "../../crates/lumigift-fx" }
+nrf24 = { path = "../../crates/nrf24" }
+lumigift-logic = { path = "logic" }
+lumigift-board = { path = "board" }
+embedded-hal = "1.0"
+cortex-m = { version = "0.7.7", features = ["critical-section-single-core"] }
+# set-vtor: the app relies on it (it runs at 0x0800_2900); harmless for the bootloader.
+cortex-m-rt = { version = "0.7.5", features = ["device", "set-vtor"] }
+stm32-metapac = { version = "21.0.0", features = ["stm32c011f6", "rt"] }
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = 2
+incremental = false
+overflow-checks = false
+
+# Unoptimised builds do not fit the 10 KiB bootloader; keep dev close to release.
+[profile.dev]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+debug = 2
+debug-assertions = false
+overflow-checks = false
+incremental = false

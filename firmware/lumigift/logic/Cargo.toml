@@ -1,0 +1,15 @@
+[package]
+name = "lumigift-logic"
+description = "Hardware-independent Lumigift firmware logic (host unit-tested)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lumigift-proto.workspace = true
+
+[lib]
+# Run with `cargo test-host` (alias for `cargo test -p lumigift-logic --target host-tuple`).
+test = true
+doctest = false
+bench = false

@@ -1,0 +1,8 @@
+[package]
+name = "lumigift-proto"
+description = "Over-the-air protocol, flash layout and firmware image format for Lumigift"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]

@@ -1,0 +1,21 @@
+[package]
+name = "lumigift-audio"
+description = "Audio decoding, playback clock, music analysis, show model and show engine for Lumigift"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+lumigift-proto = { path = "../../crates/lumigift-proto" }
+lumigift-fx = { path = "../../crates/lumigift-fx" }
+symphonia = { version = "0.6", features = ["all"] }
+cpal = "0.18"
+realfft = "3.5"
+directories = "6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+postcard = { version = "1.1", features = ["use-std"] }
+blake3 = "1.8"
+thiserror = "2"
+parking_lot = "0.12"
+log = "0.4"

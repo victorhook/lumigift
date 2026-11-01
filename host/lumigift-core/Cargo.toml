@@ -1,0 +1,25 @@
+[package]
+name = "lumigift-core"
+description = "Lumigift link manager: scheduler, gift registry/telemetry, discovery, OTA engine and simulator"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+nrf24-usb = { path = "../nrf24-usb" }
+nrf24-usb-proto = { path = "../../crates/nrf24-usb-proto" }
+lumigift-proto = { path = "../../crates/lumigift-proto" }
+# The simulator runs the bootloader's own (hardware-independent) logic.
+lumigift-logic = { path = "../../firmware/lumigift/logic" }
+lumigift-fx = { path = "../../crates/lumigift-fx" }
+crossbeam-channel = "0.5"
+arc-swap = "1.7"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+directories = "6"
+fastrand = "2"
+thiserror = "2"
+log = "0.4"
+
+[dev-dependencies]
+tempfile = "3"

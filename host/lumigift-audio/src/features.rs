@@ -1,0 +1,97 @@
+//! The common feature interface shared by offline analysis and live sources.
+//!
+//! [`crate::ShowEngine`] only talks to a [`FeatureProvider`]. The offline
+//! [`crate::Analysis`] implements it (with perfect look-ahead), and so does
+//! [`crate::live::LiveFeatures`] (causal, fed by a
+//! [`crate::live::RealtimeAnalyzer`]). Any future source, such as PipeWire
+//! capture or librespot, only has to produce [`FeatureFrame`]s plus events.
+
+use serde::{Deserialize, Serialize};
+
+/// Audio features for one analysis frame (~10 ms). All normalised values are
+/// 0.0..=1.0 with track-adaptive scaling (quiet and loud tracks both use the
+/// full range).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct FeatureFrame {
+    /// ~20–150 Hz energy.
+    pub bass: f32,
+    /// ~150–2000 Hz energy.
+    pub mid: f32,
+    /// ~2–12 kHz energy.
+    pub treble: f32,
+    /// Overall loudness (RMS).
+    pub level: f32,
+    /// Spectral-flux onset strength.
+    pub onset: f32,
+    /// Absolute RMS level in dBFS (not normalised; used for silence detection).
+    pub rms_db: f32,
+}
+
+impl FeatureFrame {
+    /// The frame reported outside the signal: all zero, RMS at -120 dBFS.
+    pub(crate) const SILENT: FeatureFrame = FeatureFrame {
+        bass: 0.0,
+        mid: 0.0,
+        treble: 0.0,
+        level: 0.0,
+        onset: 0.0,
+        rms_db: -120.0,
+    };
+
+    /// Linear interpolation between two frames.
+    pub fn lerp(&self, o: &FeatureFrame, t: f32) -> FeatureFrame {
+        let l = |a: f32, b: f32| a + (b - a) * t;
+        FeatureFrame {
+            bass: l(self.bass, o.bass),
+            mid: l(self.mid, o.mid),
+            treble: l(self.treble, o.treble),
+            level: l(self.level, o.level),
+            onset: l(self.onset, o.onset),
+            rms_db: l(self.rms_db, o.rms_db),
+        }
+    }
+
+    /// True when the frame is effectively silent.
+    pub fn is_silent(&self) -> bool {
+        self.rms_db < SILENCE_DB
+    }
+
+    /// Bass-weighted loudness (0..=1) used for drops and section energy.
+    pub(crate) fn energy(&self) -> f32 {
+        0.45 * self.bass + 0.35 * self.level + 0.2 * self.mid
+    }
+}
+
+/// RMS level (dBFS) below which audio counts as silence.
+pub const SILENCE_DB: f32 = -55.0;
+
+/// Where a moment lies on the beat grid.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Serialize, Deserialize)]
+pub struct BeatPosition {
+    /// Index of the beat at or before `t` (may be negative before the first beat).
+    pub beat_index: i64,
+    /// Progress through the current beat, 0.0..1.0.
+    pub phase: f32,
+    /// Beat within the bar, 0..=3 (0 = downbeat; 4/4 assumed).
+    pub beat_in_bar: u8,
+    /// Bar counter (may be negative before the first downbeat).
+    pub bar: i64,
+    /// Local tempo.
+    pub bpm: f32,
+}
+
+/// Source of features for the [`crate::ShowEngine`].
+///
+/// Times are media seconds on the provider's own time line: track position for
+/// files, the capture clock ([`crate::live::LiveFeatures::now`]) for live input.
+pub trait FeatureProvider: Send + Sync {
+    /// Features at time `t` (interpolated where the provider can).
+    fn features_at(&self, t: f64) -> FeatureFrame;
+    /// Beat grid position at `t`, or `None` if no tempo is known.
+    fn beat_at(&self, t: f64) -> Option<BeatPosition>;
+    /// Union of [`lumigift_proto::music_flags`] `BEAT | DOWNBEAT | ONSET | DROP`
+    /// for events falling in the half-open interval `(t0, t1]`.
+    fn events_in(&self, t0: f64, t1: f64) -> u8;
+    /// Total length for finite sources, `None` for live ones.
+    fn duration(&self) -> Option<f64>;
+}
