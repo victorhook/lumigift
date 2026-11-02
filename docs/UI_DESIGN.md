@@ -476,8 +476,8 @@ meters) are small functions in `widgets.rs` that paint with `ui.painter()` using
 
 ### 3.1 Navigation model
 
-* **One window, five destinations** in a left rail: **Fleet** (home), **Studio**, **Stage**, **Firmware**, **Settings**.
-  Shortcuts `Ctrl+1…5`. The selected rail item gets an `ACCENT_SOFT` pill behind the icon, an `ACCENT_TEXT` icon, and a 3×16 px `ACCENT` bar on the rail's left edge.
+* **One window, six destinations** in a left rail: **Fleet** (home), **Studio**, **Lighting**, **Stage**, **Firmware**, **Settings**.
+  Shortcuts `Ctrl+1…6`. The selected rail item gets an `ACCENT_SOFT` pill behind the icon, an `ACCENT_TEXT` icon, and a 3×16 px `ACCENT` bar on the rail's left edge.
 * This is Linear's "inverted L": the rail (left) plus a page header (top) frame the content. A **status bar** at the bottom is always
   visible and shows global truth: bridge, online count, LIVE/Preview, audio output, SIM.
 * **Global state lives in the status bar, not in pages.** The LIVE toggle appears in the Studio toolbar *and* the status bar,
@@ -577,6 +577,30 @@ The split between the stage and the timeline is a draggable horizontal divider (
 Lane heights: ruler 32 (the section band is drawn inside the ruler's lower 10 px when the Sections lane is hidden),
 Sections 24, Waveform 96, Bass/Mid/Treble 28 each, Cues 64, One-shots 28. The lane header column is 120 px wide.
 Lanes can be collapsed to 12 px by clicking their header, and the state is persisted per show.
+
+#### Lighting
+
+```text
+┌──────┬──────────────────────────────────────────────────────────────────┬─────────────────────────────┐
+│ rail │ Lighting   Generic looks, rendered on the gifts…   (● Driving gifts)│ OUTPUT  layers (target·look)│
+│      ├──────────────────────────────────────────────────────────────────┤ QUICK   Master ━━●  Crossfade│
+│      │            3D stage preview (stage_preview, click selects)        │         [☾ Fade out][Blackout]│
+│      ├──────────────────────────────────────────────────────────────────┤ TARGET  [All|Selected|Group] │
+│      │ EFFECTS  Click to apply to All gifts                              │         ▣ Window 4  [+ Group]│
+│      │ ┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐┌────────┐      │ LOOK    palette swatches 3×3 │
+│      │ │▪▪▪▪▪▪▪▪││ live   ││ preview││        ││        ││        │      │         colours / hue, speed,│
+│      │ │○ Solid ││ Breathe││ Fade   ││Rainbow♪││Twinkle♪││Waterfal│      │         size, brightness     │
+│      │ └────────┘└────────┘└────────┘└────────┘└────────┘└────────┘      │         [Apply to All gifts] │
+│      │ …                                                                 │ FAVOURITES  ★ rows           │
+└──────┴──────────────────────────────────────────────────────────────────┴─────────────────────────────┘
+```
+
+Effect cards (`SURFACE_2`, `R_MD`, ≥ 172 × 112): a `BG_SUNKEN` well with a live preview of 8 mini gifts (2×2 LEDs
+like the gems, soft glow), then the effect icon + name (`label`) and a `music-notes` glyph if the look also reacts to
+music. The look currently on the target gets a 1.5 px `ACCENT` outline and a soft accent halo. With *Reduce motion*
+the previews freeze. The ownership pill in the header mirrors the LIVE pill (accent when the page drives the gifts).
+Flashing looks (Blink, Police, Timed strobe) respect *Limit flashing*: speed capped at ~3 Hz, Police forced smooth.
+Page shortcuts: `Enter` apply, `F` fade out/in, `B` blackout/restore.
 
 #### Stage (standalone)
 
@@ -682,7 +706,7 @@ Settings use a 220 px section list and a content column of at most 720 px, left-
 | Scope | Keys | Action |
 |---|---|---|
 | Global | `Ctrl+K` | Command palette |
-| | `Ctrl+1…5` | Fleet / Studio / Stage / Firmware / Settings |
+| | `Ctrl+1…6` | Fleet / Studio / Lighting / Stage / Firmware / Settings |
 | | `Ctrl+I` | Toggle inspector |
 | | `Ctrl+J` | Toggle event log drawer |
 | | `Ctrl+L` | Toggle LIVE (on → see §6.3) |
@@ -1019,7 +1043,10 @@ musical position `33.1.1` (bar.beat.sixteenth, `value`, `TEXT_MUTED`). Click the
   The colour comes from the content, so each cue is recognisable at a glance and the chrome stays neutral.
 * `R_SM` corners, 1 px gap between adjacent cues. The start edge has a 2 px bright line in the palette's first stop colour.
 * Effect icons: Solid `circle`, Pulse `heartbeat`, Spectrum `equalizer`, Chase `arrows-left-right`, Strobe `lightning`,
-  Rainbow `rainbow`, Sparkle `sparkle`, Breathe `wind` (Phosphor names).
+  Rainbow `rainbow`, Sparkle `sparkle`, Breathe `wind`; generic looks: Fade `circle-half`, Waterfall `waves`, Knight Rider
+  `arrows-horizontal`, Blink `lightbulb-filament`, Twinkle `star-four`, Comet `shooting-star`, Theater Chase `dots-three-outline`,
+  Fire `flame`, Police `siren`, Timed Strobe `flashlight`, Timed Pulse `pulse`, Colour Wipe `paint-roller` (Phosphor names; the
+  Lighting rail item is `lightbulb`).
 * **Narrow cues**: < 80 px hides the second line, < 36 px hides the label and shows only the icon, < 14 px shows only the gradient.
 * **States.** Hover: brightness 36%, a 1 px `BORDER_STRONG` outline, resize cursor within 6 px of the start edge.
   Selected: 1.5 px `TEXT` outline plus 2 px `ACCENT` outer glow, and the start edge handle becomes a 4 × 20 px `ACCENT` grip.

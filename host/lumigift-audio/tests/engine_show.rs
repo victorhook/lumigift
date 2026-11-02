@@ -314,7 +314,17 @@ fn auto_generated_show_is_sensible() {
     let a = Analysis::analyze(&t.samples, 44_100);
     let show = Show::auto_generate(&a);
     assert!(show.cues.windows(2).all(|w| w[0].time <= w[1].time));
-    for fx in 0..effect::COUNT {
+    // The original eight effects (newer ones are not required here).
+    for fx in [
+        effect::SOLID,
+        effect::PULSE,
+        effect::SPECTRUM,
+        effect::CHASE,
+        effect::STROBE,
+        effect::RAINBOW,
+        effect::SPARKLE,
+        effect::BREATHE,
+    ] {
         assert!(
             show.cues.iter().any(|c| c.effect == fx),
             "effect {fx} unused"

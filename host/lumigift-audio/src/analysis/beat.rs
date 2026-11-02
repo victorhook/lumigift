@@ -20,8 +20,8 @@ const TEMPO_CHANGE_COST: f64 = 100.0;
 const TIGHTNESS: f32 = 100.0;
 
 /// Estimate a smoothly varying beat period (in frames) for every frame of
-/// `onset`, from the tempogram.
-pub fn estimate_tempo(onset: &[f32], fps: f64) -> Vec<f32> {
+/// `onset`, from the tempogram, plus per-window pulse clarity.
+pub fn estimate_tempo(onset: &[f32], fps: f64) -> TempoEstimate {
     let n = onset.len();
     let lag_min = (60.0 * fps / MAX_BPM).floor().max(1.0) as usize;
     let lag_max = (60.0 * fps / MIN_BPM).ceil() as usize;
@@ -135,7 +135,28 @@ pub fn estimate_tempo(onset: &[f32], fps: f64) -> Vec<f32> {
             (lag_min + li) as f32 + off
         })
         .collect();
-    (0..n)
+    // Pulse clarity per window: the normalised autocorrelation at the decoded
+    // lag (1 = perfectly periodic onsets, ~0.1 = rubato / no pulse), and
+    // whether the window's own best lag agrees with the decoded tempo (up to
+    // octave errors). A wandering argmax means the "tempo" is Viterbi glue.
+    let clarity: Vec<f32> = path
+        .iter()
+        .enumerate()
+        .map(|(j, &li)| acfs[j * n_lags + li].max(0.0) as f32)
+        .collect();
+    let agrees: Vec<bool> = path
+        .iter()
+        .enumerate()
+        .map(|(j, &li)| {
+            let erow = &emis[j * n_lags..(j + 1) * n_lags];
+            let best = (0..n_lags)
+                .max_by(|&a, &b| erow[a].total_cmp(&erow[b]))
+                .unwrap_or(li);
+            let r = ((lag_min + best) as f64 / (lag_min + li) as f64).log2();
+            (r - r.round()).abs() < 0.05
+        })
+        .collect();
+    let period = (0..n)
         .map(|i| {
             let x = i as f32 / hop as f32;
             let j = (x.floor() as usize).min(n_win - 1);
@@ -143,7 +164,111 @@ pub fn estimate_tempo(onset: &[f32], fps: f64) -> Vec<f32> {
             let f = (x - j as f32).clamp(0.0, 1.0);
             win_period[j] * (1.0 - f) + win_period[k] * f
         })
-        .collect()
+        .collect();
+    TempoEstimate {
+        period,
+        hop,
+        clarity,
+        agrees,
+    }
+}
+
+/// Output of [`estimate_tempo`].
+pub struct TempoEstimate {
+    /// Beat period in frames, for every frame.
+    pub period: Vec<f32>,
+    /// Tempogram hop in frames; window `j` is centred on frame `j * hop`.
+    pub hop: usize,
+    /// Per window: normalised autocorrelation at the decoded lag.
+    pub clarity: Vec<f32>,
+    /// Per window: the window's own best lag matches the decoded one.
+    pub agrees: Vec<bool>,
+}
+
+/// Autocorrelation clarity mapped to confidence: below `lo` there is no
+/// pulse, above `hi` the pulse is unmistakable (synthetic drums ~0.95,
+/// orchestral with percussion ~0.55, brushed jazz ~0.15–0.35, rubato solo
+/// violin ~0.10).
+const CLARITY_RANGE: (f32, f32) = (0.10, 0.35);
+
+/// Beat coverage mapped to confidence: the fraction of tracked beats that
+/// coincide with an onset. Drums ~0.9, jazz / orchestral ~0.8, a beat grid
+/// forced onto rubato violin ~0.4, random legato notes ~0.2.
+const COVERAGE_RANGE: (f32, f32) = (0.45, 0.75);
+
+/// Rhythm confidence (0..=1) per tempogram window: how clearly the music
+/// has a steady pulse. The product of
+///
+/// * beat coverage (`coverage[j]`, fraction of the beats around window `j`
+///   that land on an onset; NaN = no beats): a pulse needs attacks on the
+///   beats, and this is what rubato and sparse legato material lack;
+/// * autocorrelation clarity of the onset curve at the decoded tempo;
+/// * tempo stability: agreement of each window's own best lag with the
+///   decoded tempo over ±3 windows.
+///
+/// Then smoothed over time (median of 5, mean of 7 windows) so the value
+/// describes passages rather than single bars. Windows that are mostly
+/// silent take their neighbours' value.
+pub fn rhythm_confidence(est: &TempoEstimate, coverage: &[f32], silent: &[bool]) -> Vec<f32> {
+    let n_win = est.clarity.len();
+    if n_win == 0 {
+        return Vec::new();
+    }
+    let smoothstep = |x: f32, r: (f32, f32)| {
+        let t = ((x - r.0) / (r.1 - r.0)).clamp(0.0, 1.0);
+        t * t * (3.0 - 2.0 * t)
+    };
+    let active = |j: usize| {
+        let a = (j * est.hop).saturating_sub(est.hop / 2).min(silent.len());
+        let b = (j * est.hop + est.hop / 2).min(silent.len());
+        b > a && silent[a..b].iter().filter(|s| !**s).count() * 2 > b - a
+    };
+    let raw: Vec<Option<f32>> = (0..n_win)
+        .map(|j| {
+            if !active(j) {
+                return None;
+            }
+            let (a, b) = (j.saturating_sub(3), (j + 4).min(n_win));
+            let agree = est.agrees[a..b].iter().filter(|x| **x).count() as f32 / (b - a) as f32;
+            let cov = coverage
+                .get(j)
+                .copied()
+                .filter(|c| c.is_finite())
+                .unwrap_or(0.0);
+            Some(
+                smoothstep(cov, COVERAGE_RANGE)
+                    * (0.4 + 0.6 * smoothstep(est.clarity[j], CLARITY_RANGE))
+                    * (0.7 + 0.3 * agree),
+            )
+        })
+        .collect();
+    // Fill silent windows from the nearest active one.
+    let known: Vec<(usize, f32)> = raw
+        .iter()
+        .enumerate()
+        .filter_map(|(j, v)| v.map(|v| (j, v)))
+        .collect();
+    if known.is_empty() {
+        return vec![0.0; n_win];
+    }
+    let filled: Vec<f32> = (0..n_win)
+        .map(|j| {
+            raw[j].unwrap_or_else(|| {
+                known
+                    .iter()
+                    .min_by_key(|(k, _)| k.abs_diff(j))
+                    .map(|k| k.1)
+                    .unwrap_or(0.0)
+            })
+        })
+        .collect();
+    let med: Vec<f32> = (0..n_win)
+        .map(|j| {
+            let mut w: Vec<f32> = filled[j.saturating_sub(2)..(j + 3).min(n_win)].to_vec();
+            percentile(&mut w, 50.0)
+        })
+        .collect();
+    moving_average(&med, 3)
 }
 
 /// Dynamic-programming beat tracker over frames `[start, end)` of `onset`

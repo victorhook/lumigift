@@ -286,3 +286,63 @@ pub fn demo_track(sample_rate: u32) -> SynthTrack {
         sample_rate,
     )
 }
+
+/// A rendered legato melody plus its ground truth.
+pub struct LegatoTrack {
+    pub sample_rate: u32,
+    pub samples: Vec<f32>,
+    /// Start time of every note (seconds).
+    pub notes: Vec<f64>,
+}
+
+/// A solo, rubato, violin-like melody: no percussion and no steady pulse.
+///
+/// Notes of 0.3–1.6 s with random lengths (no common period), each a
+/// bowed harmonic tone with a 60 ms attack, 5.5 Hz vibrato (±0.4 semitone)
+/// and legato overlap into the next note, under slow phrase dynamics (a
+/// ~11 s swell between -14 dB and 0 dB). Deterministic for a given `seed`.
+pub fn legato_track(sample_rate: u32, seconds: f64, seed: u32) -> LegatoTrack {
+    let sr = sample_rate as f64;
+    let n = (seconds * sr) as usize;
+    let mut samples = vec![0f32; n];
+    let mut rng = Rng(seed | 1);
+    // A minor scale around A4, as semitone offsets.
+    const SCALE: [i32; 8] = [0, 2, 3, 5, 7, 8, 10, 12];
+    let mut notes = Vec::new();
+    let mut t = 0.5f64;
+    let mut degree = 3i32;
+    while t < seconds - 0.5 {
+        let len = 0.95 + 0.65 * rng.next() as f64; // 0.3 .. 1.6 s
+        notes.push(t);
+        degree = (degree + (rng.next() * 2.9) as i32).clamp(0, SCALE.len() as i32 - 1);
+        let semis = SCALE[degree as usize] - 5;
+        let f0 = 440.0 * 2f64.powf(semis as f64 / 12.0);
+        let vib_phase0 = rng.next() as f64 * std::f64::consts::PI;
+        // Legato: each note sounds 80 ms into the next one.
+        let (a, b) = ((t * sr) as usize, (((t + len + 0.08) * sr) as usize).min(n));
+        let mut phase = 0.0f64;
+        for (i, s) in samples[a..b].iter_mut().enumerate() {
+            let dt = i as f64 / sr;
+            let att = (dt / 0.06).min(1.0);
+            let rel = ((len + 0.08 - dt) / 0.08).clamp(0.0, 1.0);
+            let vib_depth = 0.4 * ((dt - 0.15) / 0.3).clamp(0.0, 1.0);
+            let vib = vib_depth * (2.0 * std::f64::consts::PI * 5.5 * dt + vib_phase0).sin();
+            let f = f0 * 2f64.powf(vib / 12.0);
+            phase += 2.0 * std::f64::consts::PI * f / sr;
+            let mut v = 0.0;
+            for k in 1..=8 {
+                v += (phase * k as f64).sin() / k as f64;
+            }
+            let at = t + dt;
+            let phrase_db = -7.0 + 7.0 * (2.0 * std::f64::consts::PI * at / 11.0).sin();
+            let g = 10f64.powf(phrase_db / 20.0) * 0.18 * att * rel;
+            *s += (v * g) as f32;
+        }
+        t += len;
+    }
+    LegatoTrack {
+        sample_rate,
+        samples,
+        notes,
+    }
+}

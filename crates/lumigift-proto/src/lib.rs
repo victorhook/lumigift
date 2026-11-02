@@ -24,6 +24,27 @@
 //! Time: every show broadcast carries the bridge's µs clock stamped right
 //! before transmission, so gifts track the bridge clock continuously.
 //!
+//! # Show stream
+//!
+//! [`Broadcast::Music`] is the main show message: `[kind][seq][time_us: 4]`
+//! then the 26-byte [`MusicFrame`] body, 32 bytes in all (the full nRF24
+//! payload):
+//!
+//! | bytes | field |
+//! |---|---|
+//! | 0..4 | effect, brightness, palette, flags |
+//! | 4..8 | bass, mid, treble, level |
+//! | 8..12 | beat_phase, beat_in_bar, bpm, hue |
+//! | 12..15 | param[0] (speed), param[1] (size), slot_count |
+//! | 15..21 | colors[0], colors[1] (RGB, used with [`PALETTE_CUSTOM`]) |
+//! | 21..25 | mask (u32 LE, bit n = slot n, [`MASK_ALL`] = everyone incl. unassigned) |
+//! | 25 | transition (crossfade, × [`TRANSITION_UNIT_MS`]) |
+//!
+//! Gifts apply a frame only if its mask covers their slot (other frames just
+//! keep the current look alive), so the host can run different looks on
+//! groups of gifts with one frame per group per tick. Decoding ignores
+//! trailing bytes.
+//!
 //! # Firmware update (OTA)
 //!
 //! Only the bootloader receives images (see `docs/ARCHITECTURE.md`):
@@ -179,13 +200,27 @@ pub mod music_flags {
     pub const SILENT: u8 = 1 << 4;
 }
 
+/// [`MusicFrame::palette`] value selecting the frame's own two colours
+/// ([`MusicFrame::colors`]) instead of a built-in palette: a gradient from the
+/// primary to the secondary colour and back, so `hue == 0` is exactly the
+/// primary colour (e.g. `Solid` shows it unchanged).
+pub const PALETTE_CUSTOM: u8 = 0xFF;
+/// [`MusicFrame::mask`] addressing every gift, including gifts without a slot.
+pub const MASK_ALL: u32 = u32::MAX;
+/// Unit of [`MusicFrame::transition`].
+pub const TRANSITION_UNIT_MS: u32 = 50;
+
 /// Audio features + rendering parameters, sent ~100 times per second.
 /// Gifts render the selected effect locally (see `lumigift-fx`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+///
+/// The music fields (`bass` … `bpm`, `flags`) are all zero for purely
+/// time-based looks; the effects run from the synced clock alone.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MusicFrame {
     pub effect: u8,
     /// Global brightness 0..=255 (before the power limiter).
     pub brightness: u8,
+    /// Index into `lumigift_fx::PALETTES`, or [`PALETTE_CUSTOM`].
     pub palette: u8,
     /// See [`music_flags`].
     pub flags: u8,
@@ -203,10 +238,66 @@ pub struct MusicFrame {
     pub bpm: u8,
     /// Base hue 0..=255.
     pub hue: u8,
-    /// Effect-specific parameters.
+    /// Effect-specific parameters: `[0]` speed, `[1]` size / width /
+    /// density (0 = the effect's default, see `lumigift_fx::EFFECTS`).
     pub param: [u8; 2],
     /// Number of slots taking part (for spatial effects).
     pub slot_count: u8,
+    /// Primary / secondary colour, used when `palette == PALETTE_CUSTOM`.
+    pub colors: [Rgb; 2],
+    /// Slot bitmask (bit `n` = slot `n`). A gift applies the frame only if
+    /// its slot's bit is set; gifts without a slot only when the mask is
+    /// [`MASK_ALL`]. Other gifts keep rendering their previous frame, so
+    /// one frame per group gives different looks on different gifts.
+    pub mask: u32,
+    /// Crossfade time in [`TRANSITION_UNIT_MS`] units, applied when the look
+    /// (effect, palette, colours, params, hue, brightness) changes. 0 = cut.
+    pub transition: u8,
+}
+
+impl Default for MusicFrame {
+    fn default() -> Self {
+        Self {
+            effect: 0,
+            brightness: 0,
+            palette: 0,
+            flags: 0,
+            bass: 0,
+            mid: 0,
+            treble: 0,
+            level: 0,
+            beat_phase: 0,
+            beat_in_bar: 0,
+            bpm: 0,
+            hue: 0,
+            param: [0; 2],
+            slot_count: 0,
+            colors: [Rgb::BLACK; 2],
+            mask: MASK_ALL,
+            transition: 0,
+        }
+    }
+}
+
+impl MusicFrame {
+    /// Bytes after the 6-byte show header.
+    pub const ENCODED_LEN: usize = 26;
+
+    /// Does this frame apply to the gift at `slot` ([`UNASSIGNED_SLOT`] for none)?
+    pub fn targets(&self, slot: u8) -> bool {
+        if self.mask == MASK_ALL {
+            return true;
+        }
+        slot < 32 && self.mask & (1 << slot) != 0
+    }
+
+    /// Mask with the bits of `slots` set (slots ≥ 32 are ignored).
+    pub fn mask_of(slots: impl IntoIterator<Item = u8>) -> u32 {
+        slots
+            .into_iter()
+            .filter(|&s| s < 32)
+            .fold(0, |m, s| m | (1 << s))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -558,6 +649,10 @@ impl Packet {
                         f.param[1],
                         f.slot_count,
                     ]);
+                    w.rgb(f.colors[0]);
+                    w.rgb(f.colors[1]);
+                    w.bytes(&f.mask.to_le_bytes());
+                    w.bytes(&[f.transition]);
                 }
                 Broadcast::Solid {
                     seq,
@@ -657,7 +752,8 @@ impl Packet {
                     kind::SYNC => Broadcast::Sync { seq, time_us },
                     kind::BLACKOUT => Broadcast::Blackout { seq, time_us },
                     kind::MUSIC => {
-                        let v: [u8; 15] = r.array()?;
+                        let v: [u8; MusicFrame::ENCODED_LEN] = r.array()?;
+                        let rgb = |i: usize| Rgb::new(v[i], v[i + 1], v[i + 2]);
                         Broadcast::Music {
                             seq,
                             time_us,
@@ -676,6 +772,9 @@ impl Packet {
                                 hue: v[11],
                                 param: [v[12], v[13]],
                                 slot_count: v[14],
+                                colors: [rgb(15), rgb(18)],
+                                mask: u32::from_le_bytes([v[21], v[22], v[23], v[24]]),
+                                transition: v[25],
                             },
                         }
                     }
@@ -953,6 +1052,50 @@ mod tests {
                 ..Default::default()
             },
         }));
+        // Every field distinct, and the whole show packet fills the payload.
+        let full = MusicFrame {
+            effect: 1,
+            brightness: 2,
+            palette: PALETTE_CUSTOM,
+            flags: 4,
+            bass: 5,
+            mid: 6,
+            treble: 7,
+            level: 8,
+            beat_phase: 9,
+            beat_in_bar: 10,
+            bpm: 11,
+            hue: 12,
+            param: [13, 14],
+            slot_count: 15,
+            colors: [Rgb::new(16, 17, 18), Rgb::new(19, 20, 21)],
+            mask: 0x8765_4321,
+            transition: 22,
+        };
+        assert_eq!(
+            rt(Packet::Broadcast(Broadcast::Music {
+                seq: 3,
+                time_us: 4,
+                frame: full,
+            })),
+            32
+        );
+        assert_eq!(6 + MusicFrame::ENCODED_LEN, MAX_PAYLOAD);
+        // Tolerant of trailing bytes, strict about missing ones.
+        let mut buf = [0u8; MAX_PAYLOAD];
+        let n = Packet::Broadcast(Broadcast::Music {
+            seq: 3,
+            time_us: 4,
+            frame: full,
+        })
+        .encode(&mut buf);
+        assert!(Packet::decode(&buf[..n - 1]).is_err());
+        let mut long = [0u8; MAX_PAYLOAD + 2];
+        long[..n].copy_from_slice(&buf[..n]);
+        assert!(matches!(
+            Packet::decode(&long),
+            Ok(Packet::Broadcast(Broadcast::Music { frame, .. })) if frame == full
+        ));
         assert_eq!(
             rt(Packet::Broadcast(Broadcast::Solid {
                 seq: 1,
@@ -1089,6 +1232,25 @@ mod tests {
             ok: true,
             value: 200,
         });
+    }
+
+    #[test]
+    fn music_frame_mask() {
+        let all = MusicFrame::default();
+        assert_eq!(all.mask, MASK_ALL);
+        assert!(all.targets(0) && all.targets(31) && all.targets(UNASSIGNED_SLOT));
+        let f = MusicFrame {
+            mask: MusicFrame::mask_of([0, 5, 31, 40]),
+            ..Default::default()
+        };
+        assert_eq!(f.mask, 1 | 1 << 5 | 1 << 31);
+        assert!(f.targets(0) && f.targets(5) && f.targets(31));
+        assert!(!f.targets(1) && !f.targets(UNASSIGNED_SLOT) && !f.targets(40));
+        let none = MusicFrame {
+            mask: 0,
+            ..Default::default()
+        };
+        assert!(!none.targets(0));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 //! The public [`Link`] handle.
 
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
@@ -47,6 +47,7 @@ impl Link {
             snapshot: ArcSwap::from_pointee(Snapshot::default()),
             clock: ArcSwap::from_pointee(ClockSync::unsynced(epoch)),
             show: ArcSwap::from_pointee(ShowOutput::Idle),
+            show_events: AtomicU8::new(0),
             show_paused: AtomicBool::new(false),
             polling_paused: AtomicBool::new(false),
             discovery_paused: AtomicBool::new(false),
@@ -158,6 +159,14 @@ impl Link {
     /// Set what the show stream broadcasts from the next 10 ms tick on.
     /// Call as often as you like (e.g. 100×/s from the audio engine).
     pub fn set_show(&self, out: ShowOutput) {
+        let events = match &out {
+            ShowOutput::Music(f) => f.flags,
+            ShowOutput::Layers(l) => l.iter().fold(0, |a, f| a | f.flags),
+            _ => 0,
+        } & EDGE_FLAGS;
+        if events != 0 {
+            self.shared.show_events.fetch_or(events, Ordering::Relaxed);
+        }
         self.shared.show.store(Arc::new(out));
     }
 

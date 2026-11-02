@@ -70,15 +70,31 @@ pub const CURSOR: &str = "\u{e1dc}";
 pub const MOVE: &str = "\u{e0a4}";
 pub const DIAMOND: &str = "\u{e1ec}";
 pub const SUN: &str = "\u{e472}";
+pub const LIGHTBULB: &str = "\u{e2dc}";
+pub const MOON: &str = "\u{e330}";
+pub const STACK: &str = "\u{e466}";
+pub const STAR: &str = "\u{e46a}";
 
 /// Effect icons, index = lumigift_fx effect id.
-pub const EFFECT: [&str; 8] = [
-    "\u{e18a}", // Solid    circle
-    "\u{e2ac}", // Pulse    heartbeat
-    "\u{ebbc}", // Spectrum equalizer
-    "\u{e0a0}", // Chase    arrows-left-right
-    "\u{e2de}", // Strobe   lightning
-    "\u{e598}", // Rainbow  rainbow
-    "\u{e6a2}", // Sparkle  sparkle
-    "\u{e5d2}", // Breathe  wind
+pub const EFFECT: [&str; lumigift_fx::effect::ALL as usize] = [
+    "\u{e18a}", // Solid         circle
+    "\u{e2ac}", // Pulse         heartbeat
+    "\u{ebbc}", // Spectrum      equalizer
+    "\u{e0a0}", // Chase         arrows-left-right
+    "\u{e2de}", // Strobe        lightning
+    "\u{e598}", // Rainbow       rainbow
+    "\u{e6a2}", // Sparkle       sparkle
+    "\u{e5d2}", // Breathe       wind
+    "\u{e18c}", // Fade          circle-half
+    "\u{e6de}", // Waterfall     waves
+    "\u{eb06}", // Knight Rider  arrows-horizontal
+    "\u{e63c}", // Blink         lightbulb-filament
+    "\u{e6a4}", // Twinkle       star-four
+    "\u{ecfa}", // Comet         shooting-star
+    "\u{e204}", // Theater Chase dots-three-outline
+    "\u{e624}", // Fire          flame
+    "\u{e9b8}", // Police        siren
+    "\u{e246}", // Timed Strobe  flashlight
+    "\u{e000}", // Timed Pulse   pulse
+    "\u{e6f4}", // Colour Wipe   paint-roller
 ];

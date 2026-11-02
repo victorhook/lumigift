@@ -94,4 +94,25 @@ pub trait FeatureProvider: Send + Sync {
     fn events_in(&self, t0: f64, t1: f64) -> u8;
     /// Total length for finite sources, `None` for live ones.
     fn duration(&self) -> Option<f64>;
+
+    /// Rhythm confidence (0..=1) at `t`: how clearly the music has a steady
+    /// pulse there. `None` if the provider cannot tell (the engine then
+    /// trusts its beat grid, as live providers always did).
+    fn rhythm_confidence_at(&self, _t: f64) -> Option<f32> {
+        None
+    }
+
+    /// [`FeatureProvider::events_in`] plus the strength (0..=1) of the
+    /// strongest onset in `(t0, t1]` (0 if there is none). The engine calls
+    /// only this, once per frame. The default reports strength 1 for any
+    /// ONSET, so providers without strengths behave as before.
+    fn events_with_strength(&self, t0: f64, t1: f64) -> (u8, f32) {
+        let flags = self.events_in(t0, t1);
+        let strength = if flags & lumigift_proto::music_flags::ONSET != 0 {
+            1.0
+        } else {
+            0.0
+        };
+        (flags, strength)
+    }
 }

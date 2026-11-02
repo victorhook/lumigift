@@ -968,8 +968,10 @@ impl SimGift {
         self.last_show = Some(t);
         match data {
             Some(LedUpdate::Music(f)) => {
-                self.renderer.on_frame(&f, w.bridge_ms(t));
-                self.led_mode = LedMode::Music;
+                // Like the firmware: frames for other groups only keep the look alive.
+                if self.renderer.on_frame_for(&f, w.bridge_ms(t), self.slot) {
+                    self.led_mode = LedMode::Music;
+                }
             }
             Some(LedUpdate::Static(c)) => self.led_mode = LedMode::Static(c),
             Some(LedUpdate::Off) => self.led_mode = LedMode::Off,
@@ -1160,12 +1162,8 @@ impl SimGift {
             LedMode::Static(c) => c,
             LedMode::Music => {
                 let mut o = black;
-                let slot = if self.slot == UNASSIGNED_SLOT {
-                    0
-                } else {
-                    self.slot
-                };
-                self.renderer.render(w.bridge_ms(t), slot, &mut o);
+                // The raw slot, like the firmware (unassigned = 0xFF).
+                self.renderer.render(w.bridge_ms(t), self.slot, &mut o);
                 o
             }
         };

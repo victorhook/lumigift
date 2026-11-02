@@ -61,12 +61,30 @@ impl FromStr for Uid {
 // Show output
 // ---------------------------------------------------------------------------
 
+/// Most Music layers broadcast per 10 ms show tick (see [`ShowOutput::Layers`]).
+pub const MAX_LAYERS_PER_TICK: usize = 8;
+
+/// Music flags that mark a moment rather than a state. The link sends each
+/// one exactly once (on the next show tick after the frame that set it), so
+/// a UI updating faster or slower than the show rate neither repeats nor
+/// drops beats and onsets.
+pub const EDGE_FLAGS: u8 = lumigift_proto::music_flags::BEAT
+    | lumigift_proto::music_flags::DOWNBEAT
+    | lumigift_proto::music_flags::ONSET
+    | lumigift_proto::music_flags::DROP;
+
 /// What the show stream broadcasts every tick (latest value wins).
 /// Set with [`Link::set_show`](crate::Link::set_show).
 #[derive(Debug, Clone, PartialEq, Default)]
 pub enum ShowOutput {
     /// Audio features; every gift renders the effect locally.
     Music(MusicFrame),
+    /// Several Music frames, one per group of gifts: each gift applies only
+    /// the frames whose [`MusicFrame::mask`] includes its slot and keeps
+    /// rendering its last look otherwise. Every layer is broadcast each tick
+    /// (up to [`MAX_LAYERS_PER_TICK`]; more are sent round-robin). Put the
+    /// broadest layer first: a later layer wins on gifts in both masks.
+    Layers(Vec<MusicFrame>),
     /// One colour per slot (index = slot). Packed 8 slots per packet.
     Solid(Vec<Rgb>),
     /// Four LED colours per slot (index = slot). Packed 2 slots per packet.

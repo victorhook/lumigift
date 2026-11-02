@@ -30,17 +30,19 @@ pub enum Page {
     #[default]
     Fleet,
     Studio,
+    Lighting,
     Stage,
     Firmware,
     Settings,
 }
 
 impl Page {
-    pub const ALL: [Page; 5] = [Page::Fleet, Page::Studio, Page::Stage, Page::Firmware, Page::Settings];
+    pub const ALL: [Page; 6] = [Page::Fleet, Page::Studio, Page::Lighting, Page::Stage, Page::Firmware, Page::Settings];
     pub fn name(self) -> &'static str {
         match self {
             Page::Fleet => "Fleet",
             Page::Studio => "Studio",
+            Page::Lighting => "Lighting",
             Page::Stage => "Stage",
             Page::Firmware => "Firmware",
             Page::Settings => "Settings",
@@ -50,6 +52,7 @@ impl Page {
         match self {
             Page::Fleet => icons::GIFT,
             Page::Studio => icons::WAVEFORM,
+            Page::Lighting => icons::LIGHTBULB,
             Page::Stage => icons::CUBE,
             Page::Firmware => icons::DOWNLOAD,
             Page::Settings => icons::GEAR,
@@ -87,6 +90,8 @@ pub struct Persist {
     pub sim_banner_dismissed: bool,
     pub stage_labels: bool,
     pub list_hint_dismissed: bool,
+    /// Lighting page: edited look, groups, favourites.
+    pub lighting: crate::pages::lighting::LightingPersist,
 }
 
 impl Default for Persist {
@@ -116,6 +121,7 @@ impl Default for Persist {
             sim_banner_dismissed: false,
             stage_labels: true,
             list_hint_dismissed: false,
+            lighting: Default::default(),
         }
     }
 }
@@ -175,6 +181,8 @@ pub struct App {
     pub studio: Studio,
     pub stage_page: StagePage,
     pub settings: SettingsPage,
+    /// Lighting page state; owns the show output while armed.
+    pub lighting: crate::pages::lighting::Lighting,
     pub blink_color: Rgb,
     page_changed_at: Instant,
     last_page: Page,
@@ -243,6 +251,7 @@ impl App {
             firmware: Firmware::default(),
             stage_page: StagePage::default(),
             settings: SettingsPage::default(),
+            lighting: Default::default(),
             blink_color: Rgb::new(0xFF, 0xF0, 0xDC),
             page_changed_at: Instant::now(),
             last_page: Page::Fleet,
@@ -315,6 +324,7 @@ impl App {
         self.selection.clear();
         self.focus = None;
         self.live = false;
+        self.lighting.release();
     }
 
     pub fn start_sim(&mut self, n: usize) {
@@ -404,6 +414,8 @@ impl App {
             }
             self.live = true;
             self.live_engaged_at = Some(Instant::now());
+            // Going LIVE takes the gifts back from the Lighting page.
+            self.lighting.release();
         } else {
             self.live = false;
             self.live_engaged_at = None;
@@ -505,9 +517,18 @@ impl App {
 
         // Show → light pipeline.
         let slots = self.slot_count();
-        let frame = self.studio.tick(&self.persist, slots);
+        // Preview and radio frames are timed separately (see Studio::tick):
+        // only the real radio path gets the calibrated latency.
+        let radio_path = match (self.live, self.backend.is_some(), self.is_sim()) {
+            (true, true, true) => crate::pages::studio::RadioPath::Simulator,
+            (true, true, false) => crate::pages::studio::RadioPath::Hardware,
+            _ => crate::pages::studio::RadioPath::None,
+        };
+        let display_dt = ctx.input(|i| i.predicted_dt) as f64;
+        let frames = self.studio.tick(&self.persist, slots, display_dt, radio_path);
+        let frame = frames.map(|f| f.preview);
         if let Some(link) = self.backend.as_ref().map(|b| b.link.clone()) {
-            let out = crate::backend::show_output(self.blackout, self.live, frame);
+            let out = crate::backend::show_output(self.blackout, self.live, frames.and_then(|f| f.radio));
             if self.live || self.blackout {
                 link.set_show(out);
             }
@@ -522,6 +543,8 @@ impl App {
         };
         let snap = self.snap.clone();
         self.lights.update(&snap, self.backend.as_ref(), src, self.blink_color);
+        // Lighting page output (ownership rules in pages/lighting.rs).
+        crate::pages::lighting::drive(self);
 
         let dt = ctx.input(|i| i.unstable_dt).max(1e-4);
         self.fps = self.fps * 0.95 + (1.0 / dt) * 0.05;
@@ -540,7 +563,7 @@ impl App {
         if self.palette.is_open() {
             return;
         }
-        for (k, p) in [(Key::Num1, Page::Fleet), (Key::Num2, Page::Studio), (Key::Num3, Page::Stage), (Key::Num4, Page::Firmware), (Key::Num5, Page::Settings)] {
+        for (k, p) in [(Key::Num1, Page::Fleet), (Key::Num2, Page::Studio), (Key::Num3, Page::Lighting), (Key::Num4, Page::Stage), (Key::Num5, Page::Firmware), (Key::Num6, Page::Settings)] {
             if consume(sc(ctrl, k)) {
                 self.set_page(p);
             }
@@ -684,8 +707,11 @@ impl App {
                     widgets::text(ui, format!("{online}/{total} online"), "small", TEXT_MUTED);
                     seg_gap(ui);
                     // LIVE / Preview
+                    let lighting = self.lighting.armed && !self.blackout;
                     let live_label = if self.blackout {
                         "Blackout".to_string()
+                    } else if lighting {
+                        self.lighting.status_label()
                     } else if self.live {
                         format!("LIVE · {online} gifts")
                     } else {
@@ -694,7 +720,7 @@ impl App {
                     let live_resp = ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 6.0;
                         let (r, _) = ui.allocate_exact_size(vec2(8.0, 8.0), Sense::hover());
-                        if self.live && !self.blackout {
+                        if lighting || (self.live && !self.blackout) {
                             let a = breathe(ui);
                             ui.painter().circle_filled(r.center(), 3.5, theme::alpha(ACCENT, a));
                         } else if self.blackout {
@@ -702,12 +728,17 @@ impl App {
                         } else {
                             ui.painter().circle_stroke(r.center(), 3.0, Stroke::new(1.0, TEXT_FAINT));
                         }
-                        widgets::text(ui, live_label, "small", if self.live { ACCENT_TEXT } else { TEXT_MUTED });
+                        widgets::text(ui, live_label, "small", if self.live || lighting { ACCENT_TEXT } else { TEXT_MUTED });
                     }).response;
+                    let tip = if lighting { "The Lighting page drives the gifts: open it" } else { "Toggle LIVE" };
                     let lr = ui.interact(live_resp.rect, ui.scope_id().with("live-seg"), Sense::click())
-                        .on_hover_ui(|ui| widgets::tooltip_with_keys(ui, "Toggle LIVE", Some("Ctrl+L")));
+                        .on_hover_ui(|ui| widgets::tooltip_with_keys(ui, tip, Some(if lighting { "Ctrl+3" } else { "Ctrl+L" })));
                     if lr.clicked() {
-                        self.toggle_live();
+                        if lighting {
+                            self.set_page(Page::Lighting);
+                        } else {
+                            self.toggle_live();
+                        }
                     }
                     if !self.compact {
                         seg_gap(ui);
@@ -839,13 +870,14 @@ impl App {
                     ui.set_opacity(egui::emath::easing::cubic_out(fade));
                     ui.ctx().request_repaint();
                 }
-                if self.backend.is_none() && page != Page::Settings && page != Page::Studio {
+                if self.backend.is_none() && !matches!(page, Page::Settings | Page::Studio | Page::Lighting) {
                     crate::pages::startup::no_bridge(self, ui);
                     return;
                 }
                 match page {
                     Page::Fleet => crate::pages::fleet::page(self, ui),
                     Page::Studio => crate::pages::studio::page(self, ui),
+                    Page::Lighting => crate::pages::lighting::page(self, ui),
                     Page::Stage => crate::pages::stage_page::page(self, ui),
                     Page::Firmware => crate::pages::firmware::page(self, ui),
                     Page::Settings => crate::pages::settings::page(self, ui),
@@ -1112,6 +1144,16 @@ impl App {
                 self.settings.section = i;
                 self.set_page(Page::Settings);
             }
+            A::LightingEffect(e) => {
+                crate::pages::lighting::apply_effect(self, e);
+                let n = lumigift_fx::EFFECTS[e as usize].name;
+                if self.persist.page != Page::Lighting {
+                    self.toasts.info(format!("Lighting: {n}"));
+                }
+            }
+            A::LightingPreset(i) => crate::pages::lighting::apply_preset(self, i),
+            A::LightingFadeOut => crate::pages::lighting::toggle_fade_out(self),
+            A::LightingRelease => crate::pages::lighting::release(self),
             A::SearchLog(q) => {
                 self.fleet.log_query = q;
                 self.persist.event_log_open = true;

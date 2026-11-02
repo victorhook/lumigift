@@ -6,8 +6,10 @@
 //! * **Show stream:** every 10 ms the current [`ShowOutput`] (set with
 //!   [`Link::set_show`]) is broadcast with NO_ACK + bridge timestamp and an
 //!   incrementing sequence number. Solid/Leds outputs for many slots become
-//!   several packets per tick. Show packets always go first and stale ones
-//!   are dropped rather than queued.
+//!   several packets per tick, and [`ShowOutput::Layers`] (one Music frame
+//!   per group of gifts, selected by the frame's slot mask) sends every
+//!   layer each tick (round-robin beyond [`MAX_LAYERS_PER_TICK`]). Show
+//!   packets always go first and stale ones are dropped rather than queued.
 //! * **Telemetry:** known gifts are polled round-robin between show frames;
 //!   each poll's ack payload carries a `Status`. Per-gift link quality,
 //!   battery, reboots, broadcast reception, histories, etc. end up in

@@ -895,7 +895,10 @@ fn context_menu(ui: &mut Ui, s: &mut Studio) {
         return;
     }
     ui.menu_button(format!("{}   Effect", icons::SPARKLE), |ui| {
-        for i in 0..8u8 {
+        for i in 0..lumigift_fx::effect::ALL {
+            if i == lumigift_fx::effect::COUNT {
+                ui.separator();
+            }
             if ui.button(format!("{}   {}", icons::EFFECT[i as usize], EFFECT_NAMES[i as usize])).clicked() {
                 s.edit_selected(|c| c.effect = i);
                 ui.close();

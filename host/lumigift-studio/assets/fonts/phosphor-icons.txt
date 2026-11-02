@@ -99,3 +99,17 @@ sun e472
 cards e0f8
 selection-plus e69c
 funnel e266
+circle-half e18c
+waves e6de
+arrows-horizontal eb06
+lightbulb-filament e63c
+star-four e6a4
+shooting-star ecfa
+dots-three-outline e204
+flame e624
+siren e9b8
+flashlight e246
+pulse e000
+paint-roller e6f4
+moon e330
+stack e466

@@ -4,8 +4,8 @@ use std::time::Instant;
 
 use super::dsp::{self, Frontend, N_BANDS, RawFrame};
 use super::{
-    ANALYSIS_VERSION, Analysis, Beat, DropEvent, ONSET_TIME_CORRECTION, Onset, Section,
-    SectionKind, Spectrogram, Waveform, beat, nearest_within, structure,
+    ANALYSIS_VERSION, Analysis, Beat, DropEvent, ONSET_TIME_CORRECTION, Section, SectionKind,
+    Spectrogram, Waveform, beat, nearest_within, onset, structure,
 };
 use crate::Result;
 use crate::features::{FeatureFrame, SILENCE_DB};
@@ -25,22 +25,32 @@ pub(crate) fn analyze_with(mono: &[f32], sample_rate: u32, ctx: &JobContext) -> 
     // 2. Normalisation.
     let (frames, silent) = normalise(&raw);
 
-    // 3. Onsets.
-    let onset_curve: Vec<f32> = frames.iter().map(|f| f.onset).collect();
-    let onsets = pick_onsets(&onset_curve, &silent, fps);
+    // 3. Onsets (vibrato-suppressed flux, adaptive threshold).
+    let bands: Vec<[f32; N_BANDS]> = raw.iter().map(|r| r.bands_db).collect();
+    let onsets = onset::pick(&onset::detection_function(&bands, &silent), &silent, fps);
     ctx.check_cancel()?;
 
     // 4./5. Tempo and beats per non-silent region.
     let flux: Vec<f32> = raw.iter().map(|r| r.flux).collect();
     let bcurve = beat::beat_onset_curve(&flux, fps);
-    let period = beat::estimate_tempo(&bcurve, fps);
+    let tempo = beat::estimate_tempo(&bcurve, fps);
+    let period = &tempo.period;
     ctx.set_progress(0.75);
     ctx.check_cancel()?;
     let regions = beat::active_regions(&silent, (1.0 * fps) as usize, (3.0 * fps) as usize);
-    let bands: Vec<[f32; N_BANDS]> = raw.iter().map(|r| r.bands_db).collect();
-    let (beats, bpm) = track_regions(&regions, &bcurve, &period, &raw, &frames, &bands, fps);
+    let (beats, bpm) = track_regions(&regions, &bcurve, period, &raw, &frames, &bands, fps);
     ctx.set_progress(0.85);
     ctx.check_cancel()?;
+
+    // Rhythm confidence (pulse clarity) over time and for the whole track.
+    let rhythm_hop = tempo.hop as f64 / fps;
+    let coverage = beat_coverage(&beats, &onsets, tempo.clarity.len(), rhythm_hop);
+    let rhythm = if beats.is_empty() {
+        vec![0.0; tempo.clarity.len()]
+    } else {
+        beat::rhythm_confidence(&tempo, &coverage, &silent)
+    };
+    let rhythm_confidence = track_rhythm(&rhythm, &silent, tempo.hop);
 
     // 6. Drops and sections.
     ctx.set_stage("Finding sections");
@@ -85,7 +95,12 @@ pub(crate) fn analyze_with(mono: &[f32], sample_rate: u32, ctx: &JobContext) -> 
     }
     bounds.sort_by(f64::total_cmp);
     bounds.dedup_by(|a, b| (*a - *b).abs() < 2.0);
-    let sections = build_sections(&bounds, duration, &frames, &energy, &drops, fps);
+    let mut sections = build_sections(&bounds, duration, &frames, &energy, &drops, fps);
+    for s in &mut sections {
+        let a = (s.start / rhythm_hop).round() as usize;
+        let b = ((s.end / rhythm_hop).round() as usize + 1).min(rhythm.len());
+        s.rhythm = if b > a { dsp::mean(&rhythm[a..b]) } else { 0.0 };
+    }
 
     // 7. Overviews.
     ctx.set_stage("Building overview");
@@ -105,6 +120,9 @@ pub(crate) fn analyze_with(mono: &[f32], sample_rate: u32, ctx: &JobContext) -> 
         beats,
         sections,
         drops,
+        rhythm,
+        rhythm_hop,
+        rhythm_confidence,
         waveform,
         spectrogram,
         analysis_seconds: started.elapsed().as_secs_f32(),
@@ -261,33 +279,45 @@ fn track_regions(
     (beats, bpm)
 }
 
-fn pick_onsets(o: &[f32], silent: &[bool], fps: f64) -> Vec<Onset> {
-    let n = o.len();
-    let w_max = (0.03 * fps).round() as usize;
-    let w_avg = (0.1 * fps).round() as usize;
-    let min_gap = (0.03 * fps).round().max(1.0) as usize;
-    let avg = dsp::moving_average(o, w_avg);
-    let mut out = Vec::new();
-    let mut last: Option<usize> = None;
-    for i in 0..n {
-        if silent[i] || o[i] < 0.15 || o[i] < avg[i] + 0.08 {
-            continue;
-        }
-        let a = i.saturating_sub(w_max);
-        let b = (i + w_max + 1).min(n);
-        if o[a..b].iter().any(|&v| v > o[i]) || o[a..i].contains(&o[i]) {
-            continue;
-        }
-        if last.is_some_and(|l| i - l < min_gap) {
-            continue;
-        }
-        last = Some(i);
-        out.push(Onset {
-            time: i as f64 / fps + ONSET_TIME_CORRECTION,
-            strength: o[i],
-        });
-    }
-    out
+/// Per tempogram window: the fraction of beats within ±4 s whose time has a
+/// default-sensitivity onset within ±60 ms (NaN where there are no beats).
+/// Music with a pulse has attacks on (most of) its beats; a beat grid
+/// stretched over rubato notes mostly falls between them.
+fn beat_coverage(beats: &[Beat], onsets: &[super::Onset], n_win: usize, hop_s: f64) -> Vec<f32> {
+    let times: Vec<f64> = onsets
+        .iter()
+        .filter(|o| o.strength >= 0.5)
+        .map(|o| o.time)
+        .collect();
+    let hit: Vec<bool> = beats
+        .iter()
+        .map(|b| nearest_within(&times, b.time, 0.06).is_some())
+        .collect();
+    (0..n_win)
+        .map(|j| {
+            let c = j as f64 * hop_s;
+            let a = beats.partition_point(|b| b.time < c - 4.0);
+            let b = beats.partition_point(|b| b.time < c + 4.0);
+            if b <= a {
+                return f32::NAN;
+            }
+            hit[a..b].iter().filter(|h| **h).count() as f32 / (b - a) as f32
+        })
+        .collect()
+}
+
+/// Track-level rhythm confidence: the mean over non-silent windows.
+fn track_rhythm(rhythm: &[f32], silent: &[bool], hop: usize) -> f32 {
+    let vals: Vec<f32> = rhythm
+        .iter()
+        .enumerate()
+        .filter(|(j, _)| {
+            let i = j * hop;
+            i < silent.len() && !silent[i]
+        })
+        .map(|(_, &v)| v)
+        .collect();
+    dsp::mean(&vals)
 }
 
 fn build_sections(
@@ -337,6 +367,7 @@ fn build_sections(
                 energy: 0.0,
                 kind: SectionKind::Medium,
                 starts_with_drop: drops.iter().any(|d| (d.time - w[0]).abs() < 1.0),
+                rhythm: 0.0,
             };
             (sec, e, silent_frac > 0.8)
         })

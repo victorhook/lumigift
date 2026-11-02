@@ -1,4 +1,5 @@
-//! Analyse an audio file and print tempo, beats, sections and drops.
+//! Analyse an audio file and print tempo, rhythm confidence, beats, onsets,
+//! sections and drops.
 //!
 //! ```sh
 //! cargo run -p lumigift-audio --release --example analyze -- song.mp3 [--cache] [--show out.lgshow]
@@ -9,7 +10,8 @@
 
 use std::time::Instant;
 
-use lumigift_audio::{AnalysisCache, Show, decode_file, load_track};
+use lumigift_audio::engine::RHYTHM_THRESHOLD;
+use lumigift_audio::{AnalysisCache, Show, ShowSettings, decode_file, load_track};
 
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -85,9 +87,36 @@ fn main() {
     println!();
     println!("Tempo:     {:.1} BPM", a.bpm);
     println!(
-        "Beats:     {} ({} bars), onsets: {}",
+        "Rhythm:    confidence {:.2} ({})",
+        a.rhythm_confidence,
+        if a.rhythm_confidence >= RHYTHM_THRESHOLD {
+            "clear pulse: beat sync on"
+        } else if a.rhythm.iter().any(|&r| r >= RHYTHM_THRESHOLD) {
+            "partly rhythmic: beat sync only in passages with a clear pulse"
+        } else {
+            "no steady pulse: beat sync off, tempo is a guess"
+        }
+    );
+    if !a.rhythm.is_empty() {
+        // One character per ~2 s: ▁ (no pulse) .. █ (clear pulse).
+        const BARS: [char; 8] = ['▁', '▂', '▃', '▄', '▅', '▆', '▇', '█'];
+        let line: String = a
+            .rhythm
+            .chunks(2)
+            .map(|c| {
+                let v = c.iter().sum::<f32>() / c.len() as f32;
+                BARS[((v * 7.0).round() as usize).min(7)]
+            })
+            .collect();
+        println!("           {line}");
+    }
+    let default_onsets = a.onsets_at(ShowSettings::DEFAULT_SENSITIVITY).count();
+    println!(
+        "Beats:     {} ({} bars), onsets: {} at default sensitivity ({:.1}/s; {} at most sensitive)",
         a.beats.len(),
         a.downbeats().count(),
+        default_onsets,
+        default_onsets as f64 / a.duration.max(1e-3),
         a.onsets.len()
     );
     if let (Some(first), Some(last)) = (a.beats.first(), a.beats.last()) {
@@ -112,12 +141,13 @@ fn main() {
     for (i, s) in a.sections.iter().enumerate() {
         let bar = "█".repeat((s.energy * 20.0).round() as usize);
         println!(
-            "  {:2}  {:>6} – {:>6}  {:<8} {:<20} {}",
+            "  {:2}  {:>6} – {:>6}  {:<8} {:<20} rhythm {:.2}  {}",
             i + 1,
             mmss(s.start),
             mmss(s.end),
             format!("{:?}", s.kind),
             bar,
+            s.rhythm,
             if s.starts_with_drop { "DROP" } else { "" }
         );
     }

@@ -1,7 +1,7 @@
 //! Shared state: gift registry, telemetry bookkeeping, event log, snapshots.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, VecDeque};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -26,6 +26,9 @@ pub(crate) struct Shared {
     pub snapshot: ArcSwap<Snapshot>,
     pub clock: ArcSwap<ClockSync>,
     pub show: ArcSwap<ShowOutput>,
+    /// One-shot music flags (`EDGE_FLAGS`) set since the last show tick, so
+    /// each beat/onset goes out exactly once whatever rate `set_show` runs at.
+    pub show_events: AtomicU8,
     pub show_paused: AtomicBool,
     pub polling_paused: AtomicBool,
     pub discovery_paused: AtomicBool,

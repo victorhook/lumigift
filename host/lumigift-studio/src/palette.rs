@@ -49,6 +49,10 @@ pub enum PaletteAction {
     ReduceMotion,
     SettingsSection(usize),
     SearchLog(String),
+    LightingEffect(u8),
+    LightingPreset(usize),
+    LightingFadeOut,
+    LightingRelease,
 }
 
 #[derive(Clone)]
@@ -70,7 +74,7 @@ pub fn build_commands(app: &App) -> Vec<Command> {
     use PaletteAction as A;
     let mut v = Vec::new();
     for (i, p) in Page::ALL.iter().enumerate() {
-        let keys: &'static str = ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5"][i];
+        let keys: &'static str = ["Ctrl+1", "Ctrl+2", "Ctrl+3", "Ctrl+4", "Ctrl+5", "Ctrl+6"][i];
         v.push(cmd("Navigation", p.icon(), &format!("Go to {}", p.name()), Some(keys), A::Nav(*p)));
     }
     if !app.selection.is_empty() {
@@ -109,6 +113,17 @@ pub fn build_commands(app: &App) -> Vec<Command> {
     v.push(cmd("Show", icons::MAGIC_WAND, "Auto-generate show", Some("Ctrl+G"), A::AutoGenerate));
     v.push(cmd("Show", icons::BROADCAST, if app.live { "Switch to Preview" } else { "Go LIVE" }, Some("Ctrl+L"), A::ToggleLive));
     v.push(cmd("Show", icons::LIGHTNING_SLASH, "Blackout all gifts", Some("Ctrl+Shift+B"), A::Blackout));
+    for &e in crate::pages::lighting::LIBRARY.iter() {
+        let name = lumigift_fx::EFFECTS[e as usize].name;
+        v.push(cmd("Lighting", icons::EFFECT[e as usize], &format!("Lighting: {name}"), None, A::LightingEffect(e)));
+    }
+    for (i, p) in app.persist.lighting.presets.iter().enumerate() {
+        v.push(cmd("Lighting", icons::STAR, &format!("Lighting: {}", p.name), None, A::LightingPreset(i)));
+    }
+    v.push(cmd("Lighting", icons::MOON, if app.lighting.fade_out { "Lighting: Fade in" } else { "Lighting: Fade out" }, None, A::LightingFadeOut));
+    if app.lighting.armed {
+        v.push(cmd("Lighting", icons::X, "Lighting: Release the gifts", None, A::LightingRelease));
+    }
     v.push(cmd("Transport", icons::PLAY, "Play / pause", Some("Space"), A::PlayPause));
     v.push(cmd("Transport", icons::SKIP_BACK, "Go to start", Some("Home"), A::GoToStart));
     v.push(cmd("Firmware", icons::DOWNLOAD, "Choose firmware image…", None, A::ChooseFirmware));
@@ -214,7 +229,7 @@ impl CommandPalette {
             for c in cmds.iter().filter(|c| c.group == "Suggestions") {
                 out.push(("Suggestions", c));
             }
-            for g in ["Navigation", "Gifts", "Show", "Transport", "Firmware", "View", "Settings"] {
+            for g in ["Navigation", "Gifts", "Show", "Lighting", "Transport", "Firmware", "View", "Settings"] {
                 for c in cmds.iter().filter(|c| c.group == g) {
                     // Keep per-gift commands out of the unfiltered list except "Blink".
                     if c.gift && !matches!(c.action, PaletteAction::Blink(_)) {

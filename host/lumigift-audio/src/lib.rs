@@ -56,6 +56,8 @@
 pub mod analysis;
 pub mod decode;
 mod device;
+#[doc(hidden)]
+pub mod eagerness;
 pub mod engine;
 pub mod features;
 pub mod job;
@@ -76,7 +78,7 @@ pub use features::{BeatPosition, FeatureFrame, FeatureProvider};
 pub use job::{Job, JobContext};
 pub use loader::{LoadedTrack, analyze_async, load_track};
 pub use player::{OutputDevice, PlaybackState, Player};
-pub use show::{Cue, OneShot, OneShotKind, Show, ShowSettings, SlotOverride, TrackRef};
+pub use show::{BeatSync, Cue, OneShot, OneShotKind, Show, ShowSettings, SlotOverride, TrackRef};
 
 /// Errors from this crate.
 #[derive(Debug, thiserror::Error)]

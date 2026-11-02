@@ -53,7 +53,7 @@ from flash, so the binary itself does not embed it.
 | Image | Flash | Budget | | Static RAM | RAM budget |
 |---|---:|---:|---:|---:|---:|
 | bootloader | 9 552 B | 10 224 B (10 KiB − 16 B info block) | 93.4 % | 3 376 B | 6 128 B |
-| app | 15 532 B | 20 224 B (`APP_MAX_SIZE`) | 76.8 % | 244 B | 6 128 B |
+| app | 18 160 B | 20 224 B (`APP_MAX_SIZE`) | 89.8 % | 244 B | 6 128 B |
 
 RAM excludes the 16 bytes of `BootShared` at 0x2000_17F0 in both linker
 scripts; everything not static is stack. Bootloader RAM: RX rings 2 796 B

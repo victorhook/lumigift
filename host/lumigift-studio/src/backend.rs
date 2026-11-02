@@ -165,6 +165,33 @@ impl Lights {
         self.animating = changed;
     }
 
+    /// Hardware mirror for [`ShowOutput::Layers`]: emulate each gift (it
+    /// applies the layers whose mask covers its slot, in order) with its own
+    /// renderer, so the stage shows what the real gifts render.
+    pub fn update_layers(&mut self, snap: &Snapshot, layers: &[MusicFrame]) {
+        let epoch = *self.epoch.get_or_insert_with(Instant::now);
+        let now_ms = epoch.elapsed().as_millis() as u32;
+        let mut changed = false;
+        for g in &snap.gifts {
+            let slot = g.slot.unwrap_or(lumigift_proto::UNASSIGNED_SLOT);
+            let r = self.renderers.entry(g.uid).or_insert_with(|| {
+                Renderer::new(u32::from_le_bytes([g.uid.0[8], g.uid.0[9], g.uid.0[10], g.uid.0[11]]))
+            });
+            for f in layers {
+                r.on_frame_for(f, now_ms, slot);
+            }
+            let mut out = [Rgb::BLACK; LEDS_PER_GIFT];
+            r.render(now_ms, slot, &mut out);
+            if !g.online {
+                out = [Rgb::BLACK; LEDS_PER_GIFT];
+            }
+            if self.leds.insert(g.uid, out).is_some_and(|p| p != out) {
+                changed = true;
+            }
+        }
+        self.animating |= changed;
+    }
+
     /// Feed renderers without a snapshot gift list (preview with no gifts uses virtual slots).
     pub fn render_virtual(&mut self, frame: &MusicFrame, slots: u8) -> Vec<[Rgb; LEDS_PER_GIFT]> {
         let epoch = *self.epoch.get_or_insert_with(Instant::now);

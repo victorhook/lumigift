@@ -348,9 +348,11 @@ impl App {
         let slot = self.cfg.current.slot;
         match b {
             Broadcast::Music { frame, .. } => {
-                self.renderer.on_frame(&frame, self.synced_ms());
-                self.effect = frame.effect;
-                self.mode = Mode::Music;
+                // Frames for other groups (mask) only keep the current look alive.
+                if self.renderer.on_frame_for(&frame, self.synced_ms(), slot) {
+                    self.effect = frame.effect;
+                    self.mode = Mode::Music;
+                }
             }
             Broadcast::Solid { first_slot, count, colors, .. } => {
                 if slot != UNASSIGNED_SLOT

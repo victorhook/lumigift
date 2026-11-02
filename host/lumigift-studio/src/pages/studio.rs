@@ -8,7 +8,8 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use egui::{Align, Align2, Color32, CornerRadius, Key, KeyboardShortcut, Layout, Modifiers, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
-use lumigift_audio::{AnalysisCache, Cue, FeatureProvider, Job, LoadedTrack, OneShot, OneShotKind, Player, Show, ShowEngine, TrackRef};
+use lumigift_audio::engine::{EngineCursor, RHYTHM_THRESHOLD};
+use lumigift_audio::{AnalysisCache, BeatSync, Cue, FeatureProvider, Job, LoadedTrack, OneShot, OneShotKind, Player, Show, ShowEngine, ShowSettings, TrackRef};
 use lumigift_fx::{EFFECT_NAMES, PALETTES, PALETTE_NAMES};
 use lumigift_proto::MusicFrame;
 
@@ -46,6 +47,9 @@ pub struct Studio {
     pub load_error: Option<(String, String)>,
     pub track: Option<LoadedTrack>,
     pub engine: Option<ShowEngine>,
+    /// Event / envelope cursor of the local preview (the engine's own one
+    /// serves the radio stream).
+    preview_cursor: EngineCursor,
     pending_show: Option<(PathBuf, Show)>,
     pub show_path: Option<PathBuf>,
     pub dirty: bool,
@@ -85,6 +89,30 @@ pub struct Studio {
     pub hover_t: Option<f64>,
 }
 
+/// Where the show frames go besides the local preview (see [`Studio::tick`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RadioPath {
+    /// Not LIVE: only the local preview.
+    None,
+    /// LIVE to the simulator's virtual gifts.
+    Simulator,
+    /// LIVE to real gifts over the radio bridge.
+    Hardware,
+}
+
+/// Worst-case delay from `link.set_show` to a simulated gift having the frame:
+/// one 10 ms show tick plus ~1 ms of simulated USB and air time.
+pub const SIM_PIPELINE: f64 = 0.011;
+
+/// The frames of one display frame (see [`Studio::tick`]).
+#[derive(Clone, Copy, Debug)]
+pub struct TickFrames {
+    /// For the local preview, timed for the next vsync.
+    pub preview: MusicFrame,
+    /// For the radio (LIVE), timed for when the gifts show it.
+    pub radio: Option<MusicFrame>,
+}
+
 pub fn key_t(t: f64) -> u64 {
     (t * 1000.0).round().max(0.0) as u64
 }
@@ -104,6 +132,7 @@ impl Studio {
             load_error: None,
             track: None,
             engine: None,
+            preview_cursor: EngineCursor::new(),
             pending_show: None,
             show_path: None,
             dirty: false,
@@ -288,6 +317,7 @@ impl Studio {
                 };
                 let provider: Arc<dyn FeatureProvider> = track.analysis.clone();
                 self.engine = Some(ShowEngine::new(provider, show));
+                self.preview_cursor.reset();
                 persist.last_audio = Some(track.path.clone());
                 self.track = Some(track);
                 self.reset_history();
@@ -376,6 +406,7 @@ impl Studio {
         if let Some(e) = &mut self.engine {
             e.reset();
         }
+        self.preview_cursor.reset();
     }
     pub fn seek(&mut self, t: f64) {
         if let Some(p) = &self.player {
@@ -384,6 +415,7 @@ impl Studio {
         if let Some(e) = &mut self.engine {
             e.reset();
         }
+        self.preview_cursor.reset();
     }
     pub fn seek_bar(&mut self, bar: u32) {
         let Some(t) = &self.track else { return };
@@ -397,8 +429,31 @@ impl Studio {
         self.seek(t);
     }
 
-    /// Advance the show clock; returns the frame for this display frame.
-    pub fn tick(&mut self, persist: &Persist, slots: u8) -> Option<MusicFrame> {
+    /// Advance the show clock for this display frame.
+    ///
+    /// Each frame is computed for the moment it becomes visible, so the
+    /// lights land on the sound in every mode (`Player::position` is what
+    /// is heard right now):
+    ///
+    /// * **Preview** (the Studio stage, rendered locally by
+    ///   `lumigift_fx::Renderer` in this GUI frame): visible at the next
+    ///   vsync, so `pos + display_dt`. No radio look-ahead: adding it made
+    ///   the preview run ahead of the audio by the radio latency (42 ms by
+    ///   default), which reads as "eager" lights.
+    /// * **Simulator LIVE** (the stage mirrors the virtual gifts): the frame
+    ///   is broadcast within one 10 ms scheduler tick and ~1 ms of simulated
+    ///   USB + air, rendered instantly by the sim gifts, then read back by
+    ///   the next GUI frame and shown one vsync later:
+    ///   `pos + display_dt + max(display_dt, SIM_PIPELINE)`. The calibrated
+    ///   hardware latency does not apply.
+    /// * **Hardware LIVE**: `pos + latency_ms` (the calibrated radio +
+    ///   render latency of the real gifts). The stage keeps showing the
+    ///   local preview at `pos + display_dt`.
+    ///
+    /// The radio frame drives the engine's own event cursor (every BEAT /
+    /// ONSET is sent once); the preview runs on a second cursor so both
+    /// time lines get every event.
+    pub fn tick(&mut self, persist: &Persist, slots: u8, display_dt: f64, radio: RadioPath) -> Option<TickFrames> {
         let player = self.player.as_ref()?;
         let engine = self.engine.as_mut()?;
         let mut pos = player.position();
@@ -407,12 +462,21 @@ impl Studio {
                 && b > a + 0.05 && pos >= b {
                     player.seek(a);
                     engine.reset();
+                    self.preview_cursor.reset();
                     pos = a;
                 }
-        let t = pos + persist.latency_ms as f64 / 1000.0;
-        let f = if player.is_playing() { engine.frame_at(t, slots) } else { engine.peek_frame(t, slots) };
-        self.last_frame = Some(f);
-        Some(f)
+        let display_dt = display_dt.clamp(0.0, 0.05);
+        let playing = player.is_playing();
+        let preview_t = pos + display_dt;
+        let preview = if playing { engine.peek_frame_at(&mut self.preview_cursor, preview_t, slots) } else { engine.peek_frame(preview_t, slots) };
+        let radio_t = match radio {
+            RadioPath::None => None,
+            RadioPath::Simulator => Some(pos + display_dt + display_dt.max(SIM_PIPELINE)),
+            RadioPath::Hardware => Some(pos + persist.latency_ms as f64 / 1000.0),
+        };
+        let radio = radio_t.map(|t| if playing { engine.frame_at(t, slots) } else { engine.peek_frame(t, slots) });
+        self.last_frame = Some(preview);
+        Some(TickFrames { preview, radio })
     }
 
     // -- editing ------------------------------------------------------------
@@ -980,7 +1044,12 @@ fn toolbar(app: &mut App, ui: &mut Ui) {
         });
         if let Some(t) = &app.studio.track {
             let a = &t.analysis;
-            widgets::text(ui, format!("{:.1} BPM · 4/4 · {}", a.bpm, fmt_mmss(a.duration)), "value_small", TEXT_MUTED);
+            if a.rhythm.iter().any(|&r| r >= RHYTHM_THRESHOLD) {
+                widgets::text(ui, format!("{:.1} BPM · 4/4 · {}", a.bpm, fmt_mmss(a.duration)), "value_small", TEXT_MUTED);
+            } else {
+                widgets::text(ui, format!("Free tempo · {}", fmt_mmss(a.duration)), "value_small", TEXT_MUTED)
+                    .on_hover_text(format!("No steady pulse detected (rhythm confidence {:.0}%): beat sync stays off in Auto, and the beat grid (~{:.0} BPM) is only a guide for snapping.", a.rhythm_confidence * 100.0, a.bpm));
+            }
         }
         sep(ui);
         // Auto-generate popover.
@@ -1054,7 +1123,7 @@ fn toolbar(app: &mut App, ui: &mut Ui) {
                 if s.double_clicked() {
                     app.persist.latency_ms = app.persist.default_latency_ms;
                 }
-                s.on_hover_text("Shifts the lights relative to the audio. Increase if the gifts light up late. Double-click to reset.");
+                s.on_hover_text("Radio + render latency of the real gifts when LIVE. Increase if the gifts light up late. The preview and the simulator compensate automatically. Double-click to reset.");
                 widgets::text(ui, format!("{}  Latency", icons::TIMER), "small_medium", TEXT_MUTED);
             }
         });
@@ -1365,13 +1434,8 @@ fn parse_time(s: &str) -> Option<f64> {
 }
 
 fn param_labels(effect: u8) -> (&'static str, &'static str) {
-    match effect {
-        3 => ("Speed", "Tail"),
-        4 => ("Rate", "Decay"),
-        6 => ("Density", "Decay"),
-        7 => ("Speed", "Depth"),
-        _ => ("Param 1", "Param 2"),
-    }
+    let info = lumigift_fx::EFFECTS.get(effect as usize);
+    (info.and_then(|i| i.speed).unwrap_or("Param 1"), info.and_then(|i| i.size).unwrap_or("Param 2"))
 }
 
 fn cue_inspector(app: &mut App, ui: &mut Ui) {
@@ -1382,15 +1446,18 @@ fn cue_inspector(app: &mut App, ui: &mut Ui) {
             event_inspector(app, ui, ei);
             return;
         }
-        widgets::overline(ui, "Cue");
+        ui.horizontal(|ui| {
+            widgets::overline(ui, "Cue");
+            widgets::text(ui, format!("{} cues · {} one-shots", show.cues.len(), show.events.len()), "value_small", TEXT_FAINT);
+        });
         ui.add_space(8.0);
         widgets::text(ui, "Select a cue in the timeline to edit it.", "body", TEXT_MUTED);
-        ui.add_space(6.0);
-        widgets::text(ui, format!("{} cues · {} one-shots", show.cues.len(), show.events.len()), "value_small", TEXT_FAINT);
-        ui.add_space(14.0);
+        ui.add_space(10.0);
         if widgets::secondary_button(ui, Some(icons::PLUS), "Insert cue at playhead", true).on_hover_ui(|ui| widgets::tooltip_with_keys(ui, "Insert cue", Some("C"))).clicked() {
             s.insert_cue_at_playhead();
         }
+        ui.add_space(16.0);
+        reactivity(s, ui);
         return;
     }
     let sel: Vec<usize> = s.sel.iter().copied().collect();
@@ -1411,14 +1478,16 @@ fn cue_inspector(app: &mut App, ui: &mut Ui) {
     });
     ui.add_space(10.0);
     let lw = 72.0;
-    // Effect grid 4×2.
+    // Effect grid, 3 per row: the classic music effects (keys 1–8) first,
+    // then the generic looks.
     widgets::text(ui, "Effect", "label", TEXT_MUTED);
     ui.add_space(4.0);
     let mut new_effect = None;
+    let cell_w = ((ui.available_width() - 8.0) / 3.0).floor().max(78.0);
     egui::Grid::new("fx-grid").spacing(vec2(4.0, 4.0)).show(ui, |ui| {
-        for i in 0..8u8 {
+        for i in 0..lumigift_fx::effect::ALL {
             let on = !mixed(&|c| c.effect as u32) && first.effect == i;
-            let (r, resp) = ui.allocate_exact_size(vec2(78.0, 30.0), Sense::click());
+            let (r, resp) = ui.allocate_exact_size(vec2(cell_w, 28.0), Sense::click());
             let p = ui.painter();
             p.rect_filled(r, CornerRadius::same(R_SM), if on { ACCENT_SOFT } else if resp.hovered() { HOVER } else { SURFACE_2 });
             if on {
@@ -1426,12 +1495,15 @@ fn cue_inspector(app: &mut App, ui: &mut Ui) {
             }
             let c = if on { ACCENT_TEXT } else { TEXT_SECONDARY };
             widgets::paint_icon(p, pos2(r.left() + 14.0, r.center().y), icons::EFFECT[i as usize], 14.0, c);
-            p.text(pos2(r.left() + 26.0, r.center().y), Align2::LEFT_CENTER, EFFECT_NAMES[i as usize], theme::font("small_medium"), c);
-            let resp = resp.on_hover_ui(|ui| widgets::tooltip_with_keys(ui, EFFECT_NAMES[i as usize], Some(&format!("{}", i + 1))));
+            let font = theme::font("small_medium");
+            let name = widgets::truncate(ui, EFFECT_NAMES[i as usize], &font, r.width() - 30.0);
+            p.text(pos2(r.left() + 26.0, r.center().y), Align2::LEFT_CENTER, name, font, c);
+            let key = (i < lumigift_fx::effect::COUNT).then(|| format!("{}", i + 1));
+            let resp = resp.on_hover_ui(|ui| widgets::tooltip_with_keys(ui, EFFECT_NAMES[i as usize], key.as_deref()));
             if resp.clicked() {
                 new_effect = Some(i);
             }
-            if i % 4 == 3 {
+            if i % 3 == 2 {
                 ui.end_row();
             }
         }
@@ -1570,6 +1642,92 @@ fn cue_inspector(app: &mut App, ui: &mut Ui) {
                 s.delete_selection();
             }
         });
+    }
+}
+
+/// Show-level reactivity settings (saved with the show): beat sync,
+/// onset sensitivity, smoothing and intensity. See `lumigift_audio::engine`.
+fn reactivity(s: &mut Studio, ui: &mut Ui) {
+    let Some(show) = s.show() else { return };
+    let settings = show.settings.clone();
+    let pos = s.position();
+    let rhythm = s.engine.as_ref().map(|e| e.rhythm_at(pos)).unwrap_or(0.0);
+    let syncing = s.engine.as_ref().is_some_and(|e| e.beat_sync_active(pos));
+    let lw = 72.0;
+    ui.horizontal(|ui| {
+        widgets::overline(ui, "Reactivity").on_hover_text("How eagerly the lights react to the music. Saved with the show; double-click a slider to reset it.");
+        if !settings.reactivity_is_default() {
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if widgets::text_button(ui, "Reset", TEXT_MUTED).on_hover_text("Back to the defaults").clicked() {
+                    s.checkpoint();
+                    if let Some(sh) = s.show_mut() {
+                        sh.settings.reset_reactivity();
+                    }
+                }
+            });
+        }
+    });
+    ui.add_space(8.0);
+    // Beat sync.
+    ui.horizontal(|ui| {
+        widgets::column_label(ui, "Beat sync", lw, CONTROL_H, TEXT_MUTED);
+        let mut i = BeatSync::ALL.iter().position(|b| *b == settings.beat_sync).unwrap_or(0);
+        let labels: Vec<&str> = BeatSync::ALL.iter().map(|b| b.label()).collect();
+        if widgets::segmented(ui, "beat-sync", &mut i, &labels) {
+            s.checkpoint();
+            if let Some(sh) = s.show_mut() {
+                sh.settings.beat_sync = BeatSync::ALL[i];
+            }
+        }
+    });
+    let (dot, status) = match settings.beat_sync {
+        BeatSync::Auto if syncing => (OK, format!("Following the beat · rhythm {:.0}%", rhythm * 100.0)),
+        BeatSync::Auto => (TEXT_FAINT, format!("No steady pulse · rhythm {:.0}%", rhythm * 100.0)),
+        BeatSync::On => (WARN, "Always follows the beat grid".to_string()),
+        BeatSync::Off => (TEXT_FAINT, "Never follows the beat grid".to_string()),
+    };
+    ui.horizontal(|ui| {
+        ui.add_space(lw + 8.0);
+        let (r, _) = ui.allocate_exact_size(vec2(6.0, 16.0), Sense::hover());
+        ui.painter().circle_filled(r.center(), 3.0, dot);
+        widgets::text(ui, status, "small", TEXT_MUTED);
+    })
+    .response
+    .on_hover_text("Rhythm confidence: how clearly the music has a steady pulse at the playhead. Auto follows the beat where it is at least 50%; elsewhere the lights flow with the phrasing instead.");
+    ui.add_space(4.0);
+    // Sliders, one undo step per drag gesture.
+    let rows: [(&str, f32, &str); 3] = [
+        ("Sensitivity", settings.sensitivity, "How many attacks flash and sparkle: low = only the strongest, high = every note"),
+        ("Smoothing", settings.smoothing, "How softly levels rise and fall: low = snappy, high = flowing"),
+        ("Intensity", settings.intensity, "How strongly loudness drives the lights: low = calm, high = dramatic"),
+    ];
+    let mut gesture = false;
+    let mut new = [settings.sensitivity, settings.smoothing, settings.intensity];
+    for (k, (label, value, tip)) in rows.into_iter().enumerate() {
+        ui.horizontal(|ui| {
+            widgets::column_label(ui, label, lw, CONTROL_H, TEXT_MUTED);
+            let mut v = value * 100.0;
+            let w = (ui.available_width() - 56.0).clamp(80.0, 200.0);
+            let resp = ui.add_sized(vec2(w, 20.0), egui::Slider::new(&mut v, 0.0..=100.0).show_value(false).step_by(1.0)).on_hover_text(tip);
+            widgets::text(ui, format!("{v:.0}%"), "value", TEXT_SECONDARY);
+            gesture |= resp.drag_started() || (resp.changed() && !resp.dragged());
+            if resp.double_clicked() {
+                v = ShowSettings::default_reactivity()[k] * 100.0;
+                gesture = true;
+            }
+            new[k] = v / 100.0;
+        });
+    }
+    if new != [settings.sensitivity, settings.smoothing, settings.intensity] {
+        if gesture {
+            s.checkpoint();
+        }
+        if let Some(sh) = s.show_mut() {
+            sh.settings.sensitivity = new[0];
+            sh.settings.smoothing = new[1];
+            sh.settings.intensity = new[2];
+        }
+        s.dirty = true;
     }
 }
 

@@ -55,7 +55,8 @@ See the module docs of `lumigift-proto` for the full message list. Summary:
   unicast `[node_addr,"LGFT"]`, both auto-ack + dynamic payload. The bridge sends
   broadcasts with NO_ACK, so nobody replies to them.
 * **Downlink show stream:** the host broadcasts one show frame every 10 ms
-  (Music/Solid/Leds/Blackout). Each one carries a sequence number and the bridge's µs
+  (Music/Solid/Leds/Blackout), or one Music frame per group ("layers", see
+  [Lighting](#lighting-generic-looks-and-groups)). Each one carries a sequence number and the bridge's µs
   timestamp, which the bridge stamps at TX time. Gifts count sequence gaps
   (`bcast_lost`) and keep their clock locked to the bridge.
 * **Uplink:** only through ack payloads. After every unicast packet a gift flushes its
@@ -236,3 +237,52 @@ renders from synced time, so all gifts animate in lockstep.
 * Later sources fit behind the same `AudioSource` + feature-frame interface:
   PipeWire loopback capture of any app (e.g. Spotify) with a matching
   playback delay, and Spotify Connect via librespot once it works again.
+
+## Lighting: generic looks and groups
+
+Besides music shows, `lumigift-fx` has a library of generic looks: Solid
+(constant colour), Breathe (fade in/out), Rainbow, Fade, Waterfall, Knight
+Rider, Blink, Twinkle, Comet, Theater chase, Fire, Police, Timed strobe,
+Timed pulse and Colour wipe (`lumigift_fx::EFFECTS` lists names, the
+parameters that matter and defaults). They are rendered **on the gifts**
+from the bridge-synced clock and the gift's slot, in integer math, so every
+gift animates in lockstep with the preview and the radio only carries
+parameters. They need no audio (all music fields 0); a few also react to
+audio while a show plays (marked `Music::Optional`).
+
+`MusicFrame` (32-byte broadcast, table in the `lumigift-proto` docs)
+carries, besides the effect, palette and `param[0]` speed / `param[1]` size:
+
+* `colors[2]` with `palette = PALETTE_CUSTOM` (0xFF): a primary → secondary
+  gradient, hue 0 = exactly the primary (so Solid shows it unchanged).
+* `mask: u32`: slot bitmask. A gift applies a frame only if its slot's bit is
+  set (gifts without a slot only for `MASK_ALL`); other frames only keep it
+  alive, so it keeps its previous look. `ShowOutput::Layers(Vec<MusicFrame>)`
+  sends one frame per group every tick (up to 8, round-robin beyond), later
+  layers winning on overlapping gifts. Spatial looks span the gifts in the
+  mask, in slot order (all slots for `MASK_ALL`).
+* `transition`: when the look (effect, palette, colours, params, hue,
+  brightness) changes, the gift renders the old and the new look and blends
+  them over `transition × 50 ms`; brightness 0 with a transition fades to
+  black. Music shows send 0 (cuts, as before).
+
+The gift applies the power limit, gamma and max-brightness cap after the
+renderer as for every other frame.
+
+**Studio: the Lighting page** (rail, between Studio and Stage, `Ctrl+3`)
+shows every look as a card with a live preview (rendered with `lumigift-fx`
+on a virtual row of gifts), a 3D stage preview, target (all gifts, the
+selection, or named groups saved by gift UID), palette / custom colours,
+speed, size, brightness, crossfade, master brightness, Fade out, Blackout and
+saved favourites. Command palette: "Lighting: <effect>", favourites, Fade
+out, Release.
+
+**Output ownership.** Only one source drives the show stream at a time:
+
+| Owner | How it gets the gifts | Status bar |
+|---|---|---|
+| Lighting page | applying a look (or "Take over"); switches the Studio's LIVE off | `● Lighting · Fade` |
+| Studio show | LIVE on (`Ctrl+L`), or a show starting to play while Lighting is armed (it goes LIVE) | `● LIVE · 10 gifts` |
+| nobody | releasing Lighting (restores LIVE if it was on before) or switching LIVE off | `○ Preview` |
+
+The global blackout (`Ctrl+Shift+B`) overrides both.

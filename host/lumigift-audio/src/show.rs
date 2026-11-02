@@ -127,7 +127,35 @@ pub struct OneShot {
     pub kind: OneShotKind,
 }
 
-/// Global show settings.
+/// Whether beat-driven behaviour (BEAT / DOWNBEAT flags, beat phase, tempo)
+/// follows the analysed beat grid.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BeatSync {
+    /// Follow the beat grid only where the music has a clear pulse
+    /// (rhythm confidence ≥ [`crate::engine::RHYTHM_THRESHOLD`]).
+    #[default]
+    Auto,
+    /// Always follow the beat grid.
+    On,
+    /// Never: no beat flashes, tempo 0, free-running slow phase.
+    Off,
+}
+
+impl BeatSync {
+    pub const ALL: [BeatSync; 3] = [BeatSync::Auto, BeatSync::On, BeatSync::Off];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            BeatSync::Auto => "Auto",
+            BeatSync::On => "On",
+            BeatSync::Off => "Off",
+        }
+    }
+}
+
+/// Global show settings. Every field has a default, so older `.lgshow`
+/// files load unchanged.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ShowSettings {
@@ -139,6 +167,53 @@ pub struct ShowSettings {
     pub onset_flags: bool,
     /// Send DROP flags.
     pub drop_flags: bool,
+    /// Reactivity: onset sensitivity 0..=1. An onset is flagged when its
+    /// strength is at least `1 - sensitivity`; 0.5 shows the musically
+    /// significant attacks, 1.0 every detected one, 0.0 only the strongest.
+    pub sensitivity: f32,
+    /// Reactivity: feature smoothing 0..=1 (attack/release time of bass,
+    /// mid, treble and level). 0 = raw, 1 = very smooth. Legato music gets
+    /// a slower release automatically.
+    pub smoothing: f32,
+    /// Reactivity: how strongly audio modulates the lights 0..=1. 0 = the
+    /// lights only follow the phrase-level dynamics, 0.5 = natural, 1.0 =
+    /// exaggerated.
+    pub intensity: f32,
+    /// Reactivity: beat sync mode.
+    pub beat_sync: BeatSync,
+}
+
+impl ShowSettings {
+    pub const DEFAULT_SENSITIVITY: f32 = 0.5;
+    pub const DEFAULT_SMOOTHING: f32 = 0.5;
+    pub const DEFAULT_INTENSITY: f32 = 0.5;
+
+    /// Default `[sensitivity, smoothing, intensity]`.
+    pub const fn default_reactivity() -> [f32; 3] {
+        [
+            Self::DEFAULT_SENSITIVITY,
+            Self::DEFAULT_SMOOTHING,
+            Self::DEFAULT_INTENSITY,
+        ]
+    }
+
+    /// True if the reactivity settings are all at their defaults.
+    pub fn reactivity_is_default(&self) -> bool {
+        let d = ShowSettings::default();
+        self.sensitivity == d.sensitivity
+            && self.smoothing == d.smoothing
+            && self.intensity == d.intensity
+            && self.beat_sync == d.beat_sync
+    }
+
+    /// Reset sensitivity, smoothing, intensity and beat sync.
+    pub fn reset_reactivity(&mut self) {
+        let d = ShowSettings::default();
+        self.sensitivity = d.sensitivity;
+        self.smoothing = d.smoothing;
+        self.intensity = d.intensity;
+        self.beat_sync = d.beat_sync;
+    }
 }
 
 impl Default for ShowSettings {
@@ -148,6 +223,10 @@ impl Default for ShowSettings {
             beat_flags: true,
             onset_flags: true,
             drop_flags: true,
+            sensitivity: Self::DEFAULT_SENSITIVITY,
+            smoothing: Self::DEFAULT_SMOOTHING,
+            intensity: Self::DEFAULT_INTENSITY,
+            beat_sync: BeatSync::Auto,
         }
     }
 }
@@ -325,7 +404,13 @@ impl Show {
     /// * drops: a one-beat blackout before strong drops, then a colour flash, a one-bar
     ///   Strobe cue (plus an 8 Hz strobe burst for strong drops), then the
     ///   section's intense look;
-    /// * palettes change at every section boundary.
+    /// * palettes change at every section boundary;
+    /// * sections without a clear pulse (rhythm confidence below
+    ///   [`crate::engine::RHYTHM_THRESHOLD`]: rubato, solo, ambient) get calm,
+    ///   flowing looks instead: Breathe / Solid with slow hue drift when
+    ///   calm, plus Spectrum / Sparkle when medium and Rainbow when intense,
+    ///   long cross-fades, cues every ~24 s, and no Strobe, Pulse, Chase,
+    ///   blackouts or flashes (their "drops" become a slow fade).
     pub fn auto_generate(analysis: &Analysis) -> Show {
         let mut show = Show {
             cues: Vec::new(),
@@ -377,9 +462,22 @@ impl Show {
             palette::ICE,
         ];
 
+        // Sections without a pulse: no beat-driven or flashing effects.
+        const LEGATO_CALM_FX: [u8; 2] = [effect::BREATHE, effect::SOLID];
+        const LEGATO_MED_FX: [u8; 4] = [
+            effect::BREATHE,
+            effect::SPECTRUM,
+            effect::SOLID,
+            effect::SPARKLE,
+        ];
+        const LEGATO_HIGH_FX: [u8; 3] = [effect::SPECTRUM, effect::RAINBOW, effect::BREATHE];
+        /// Cue length within a long section without a pulse, seconds.
+        const LEGATO_VARIATION_S: f64 = 24.0;
+
         let mut last_fx = u8::MAX;
         let mut last_pal = u8::MAX;
         let mut counters = [0usize; 3];
+        let mut legato_counters = [0usize; 3];
         let sections: Vec<_> = if analysis.sections.is_empty() {
             vec![Section {
                 start: 0.0,
@@ -387,6 +485,7 @@ impl Show {
                 energy: 0.5,
                 kind: SectionKind::Medium,
                 starts_with_drop: false,
+                rhythm: analysis.rhythm_confidence,
             }]
         } else {
             analysis.sections.clone()
@@ -398,7 +497,12 @@ impl Show {
                 SectionKind::Medium => 1,
                 SectionKind::Intense => 2,
             };
-            let fx_list: &[u8] = [&CALM_FX[..], &MED_FX[..], &HIGH_FX[..]][class];
+            let rhythmic = analysis.bpm > 0.0 && sec.rhythm >= crate::engine::RHYTHM_THRESHOLD;
+            let fx_list: &[u8] = if rhythmic {
+                [&CALM_FX[..], &MED_FX[..], &HIGH_FX[..]][class]
+            } else {
+                [&LEGATO_CALM_FX[..], &LEGATO_MED_FX[..], &LEGATO_HIGH_FX[..]][class]
+            };
             let pal_list: &[u8] = if class == 0 { &CALM_PAL } else { &WARM_PAL };
             let next_fx = |counters: &mut [usize; 3], last: u8| {
                 let mut fx = fx_list[counters[class] % fx_list.len()];
@@ -423,6 +527,44 @@ impl Show {
             };
             let hue_speed = [3.0, 6.0, 12.0][class];
             let mut t = sec.start;
+
+            if !rhythmic {
+                // Calm and flowing: follow phrasing and dynamics, not a grid.
+                let brightness = match sec.kind {
+                    SectionKind::Silence => 40,
+                    SectionKind::Calm => 100 + (sec.energy * 60.0) as u8,
+                    SectionKind::Medium => 140 + (sec.energy * 60.0) as u8,
+                    SectionKind::Intense => 200 + (sec.energy * 40.0) as u8,
+                };
+                let hue_speed = [2.0, 3.0, 5.0][class];
+                let mut first = true;
+                while t < sec.end - 8.0 || first {
+                    let fx = next_fx(&mut legato_counters, last_fx);
+                    last_fx = fx;
+                    show.cues.push(Cue {
+                        time: t,
+                        effect: fx,
+                        palette: pal,
+                        brightness,
+                        hue: pick.next() as u8,
+                        hue_speed: if pick.next().is_multiple_of(2) {
+                            hue_speed
+                        } else {
+                            -hue_speed
+                        },
+                        fade: 3.0,
+                        label: if first {
+                            format!("{:?}", sec.kind).to_lowercase()
+                        } else {
+                            String::new()
+                        },
+                        ..Default::default()
+                    });
+                    first = false;
+                    t += LEGATO_VARIATION_S;
+                }
+                continue;
+            }
 
             if sec.starts_with_drop {
                 let strength = analysis

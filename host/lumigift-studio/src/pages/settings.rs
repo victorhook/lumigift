@@ -357,7 +357,7 @@ fn appearance(app: &mut App, ui: &mut Ui) {
 
 pub const SHORTCUTS: &[(&str, &str, &str)] = &[
     ("Global", "Ctrl+K", "Command palette"),
-    ("Global", "Ctrl+1…5", "Fleet / Studio / Stage / Firmware / Settings"),
+    ("Global", "Ctrl+1…6", "Fleet / Studio / Lighting / Stage / Firmware / Settings"),
     ("Global", "Ctrl+I", "Toggle inspector"),
     ("Global", "Ctrl+J", "Toggle event log"),
     ("Global", "Ctrl+L", "Toggle LIVE"),
@@ -402,6 +402,9 @@ pub const SHORTCUTS: &[(&str, &str, &str)] = &[
     ("Stage", "F", "Frame all"),
     ("Stage", "A", "Toggle Arrange mode"),
     ("Stage", "H", "Toggle labels"),
+    ("Lighting", "Enter", "Apply the look to the target"),
+    ("Lighting", "F", "Fade out / in"),
+    ("Lighting", "B", "Lighting blackout / restore"),
 ];
 
 /// Shortcut list in two columns grouped by scope.

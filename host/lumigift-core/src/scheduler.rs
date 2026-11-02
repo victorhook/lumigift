@@ -338,6 +338,8 @@ pub(crate) struct Scheduler {
     // show
     next_tick: Instant,
     idle_ticks: u32,
+    /// Next layer to send when a `Layers` output has more than fit a tick.
+    layer_rr: usize,
     pending_show: VecDeque<Payload>,
     show_seq: u8,
     /// Show packets the bridge reported transmitted (TxDone order = air order).
@@ -398,6 +400,7 @@ impl Scheduler {
             seq: 0,
             next_tick: now,
             idle_ticks: 0,
+            layer_rr: 0,
             pending_show: VecDeque::new(),
             show_seq: 0,
             show_done: 0,
@@ -712,6 +715,7 @@ impl Scheduler {
             if !self.pending_show.is_empty() {
                 self.pending_show.clear();
             }
+            self.shared.show_events.store(0, Ordering::Relaxed);
             self.next_tick = now;
             return;
         }
@@ -728,6 +732,12 @@ impl Scheduler {
         self.pending_show.clear();
 
         let output = self.shared.show.load();
+        // Edge flags latched since the last tick replace the frame's own.
+        let events = self.shared.show_events.swap(0, Ordering::Relaxed);
+        let latch = |f: &lp::MusicFrame| lp::MusicFrame {
+            flags: (f.flags & !EDGE_FLAGS) | events,
+            ..*f
+        };
         // `seq` is set when the packet is sent, `time_us` stamped by the bridge.
         let (seq, time_us) = (0u8, 0u32);
         let mut push = |b: Broadcast| self.pending_show.push_back(encode(Packet::Broadcast(b)));
@@ -747,8 +757,38 @@ impl Scheduler {
             ShowOutput::Music(frame) => push(Broadcast::Music {
                 seq,
                 time_us,
-                frame: *frame,
+                frame: latch(frame),
             }),
+            ShowOutput::Layers(layers) => {
+                if layers.is_empty() {
+                    push(Broadcast::Sync { seq, time_us });
+                } else if layers.len() <= crate::types::MAX_LAYERS_PER_TICK {
+                    for frame in layers {
+                        push(Broadcast::Music {
+                            seq,
+                            time_us,
+                            frame: latch(frame),
+                        });
+                    }
+                } else {
+                    // Too many for one tick: rotate, keeping the order
+                    // within the tick (later layers still win overlaps).
+                    let n = layers.len();
+                    let start = self.layer_rr % n;
+                    let mut pick: Vec<usize> = (0..crate::types::MAX_LAYERS_PER_TICK)
+                        .map(|k| (start + k) % n)
+                        .collect();
+                    pick.sort_unstable();
+                    self.layer_rr = (start + crate::types::MAX_LAYERS_PER_TICK) % n;
+                    for i in pick {
+                        push(Broadcast::Music {
+                            seq,
+                            time_us,
+                            frame: latch(&layers[i]),
+                        });
+                    }
+                }
+            }
             ShowOutput::Blackout => push(Broadcast::Blackout { seq, time_us }),
             ShowOutput::Solid(colors) => {
                 for (i, chunk) in colors

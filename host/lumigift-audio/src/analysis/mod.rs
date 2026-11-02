@@ -8,7 +8,9 @@
 //!    `[max(p5, p97 - 30 dB), p97]` onto 0..=1 (then `^1.5`), so quiet and loud
 //!    masters both use the full LED range. Flux is divided by its 99th
 //!    percentile.
-//! 3. Onsets: peak picking on the flux with a moving-average threshold.
+//! 3. Onsets: vibrato-suppressed (SuperFlux-style) flux, peaks above an
+//!    adaptive median + MAD threshold, ≥ 90 ms apart, each with a strength
+//!    that the show's sensitivity is compared against (see `onset.rs`).
 //! 4. Tempo: autocorrelation tempogram (8 s windows, 1 s hop, 60–200 BPM) with
 //!    a log-normal prior around 120 BPM against octave errors, decoded with
 //!    Viterbi so tempo changes are followed but jitter is not.
@@ -16,6 +18,8 @@
 //!    separately for every non-silent region, refined to sub-frame precision.
 //! 6. Downbeats (4/4): per region, the bar phase whose beats carry the most
 //!    kick/bass energy and harmonic change.
+//!    Rhythm confidence over time: beat coverage (do the beats land on
+//!    onsets?) × tempogram clarity × tempo stability, smoothed over ~10 s.
 //! 7. Drops: a sharp energy rise after a quieter build-up. Sections: Foote
 //!    novelty on 0.5 s block features, plus drops and silence edges, snapped
 //!    to downbeats, with a per-section energy level.
@@ -24,6 +28,7 @@
 mod beat;
 mod cache;
 pub(crate) mod dsp;
+mod onset;
 mod overview;
 mod pipeline;
 mod structure;
@@ -39,7 +44,7 @@ use crate::features::{BeatPosition, FeatureFrame, FeatureProvider};
 use crate::job::JobContext;
 
 /// Bumped whenever the analysis output changes; part of the cache key.
-pub const ANALYSIS_VERSION: u32 = 1;
+pub const ANALYSIS_VERSION: u32 = 2;
 
 /// Systematic delay of the flux peak relative to the true attack, removed
 /// from onset and beat times (measured on synthetic drums).
@@ -49,7 +54,9 @@ pub(crate) const ONSET_TIME_CORRECTION: f64 = 0.0095;
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Onset {
     pub time: f64,
-    /// Normalised flux at the peak, 0..=1.
+    /// How clearly the attack stands out from its surroundings, 0..=1:
+    /// `1 - s`, where `s` is the lowest show sensitivity that flags it
+    /// (see [`Analysis::onsets_at`]). 1 = flagged even at sensitivity 0.
     pub strength: f32,
 }
 
@@ -98,6 +105,9 @@ pub struct Section {
     pub kind: SectionKind,
     /// True if a [`DropEvent`] marks the start of this section.
     pub starts_with_drop: bool,
+    /// Mean rhythm confidence over the section, see [`Analysis::rhythm`].
+    #[serde(default)]
+    pub rhythm: f32,
 }
 
 impl Section {
@@ -130,12 +140,24 @@ pub struct Analysis {
     pub fps: f64,
     /// Feature frame `i` describes the audio around `i / fps` seconds.
     pub frames: Vec<FeatureFrame>,
+    /// Every onset that some sensitivity would flag; use
+    /// [`Analysis::onsets_at`] for the ones a given show flags.
     pub onsets: Vec<Onset>,
     /// Dominant tempo (0 if none was found).
     pub bpm: f32,
     pub beats: Vec<Beat>,
     pub sections: Vec<Section>,
     pub drops: Vec<DropEvent>,
+    /// Rhythm confidence (pulse clarity) 0..=1 over time: `rhythm[j]`
+    /// describes the ~8 s around `j * rhythm_hop` seconds. High for music
+    /// with a steady, audible pulse (pop, EDM, rock); low for rubato, solo
+    /// or ambient music, where the beat grid is a guess. See
+    /// [`Analysis::rhythm_at`].
+    pub rhythm: Vec<f32>,
+    /// Seconds between [`Analysis::rhythm`] values (~1 s).
+    pub rhythm_hop: f64,
+    /// Rhythm confidence of the whole track (mean over non-silent passages).
+    pub rhythm_confidence: f32,
     pub waveform: Waveform,
     pub spectrogram: Spectrogram,
     /// Wall-clock time the analysis took, seconds.
@@ -271,6 +293,26 @@ impl Analysis {
         })
     }
 
+    /// The onsets an engine with this `sensitivity` (0..=1, see
+    /// [`crate::ShowSettings::sensitivity`]) flags: `strength >= 1 - sensitivity`.
+    pub fn onsets_at(&self, sensitivity: f32) -> impl Iterator<Item = &Onset> {
+        let min = 1.0 - sensitivity.clamp(0.0, 1.0) - 1e-6;
+        self.onsets.iter().filter(move |o| o.strength >= min)
+    }
+
+    /// Rhythm confidence (0..=1) at `t`, linearly interpolated.
+    pub fn rhythm_at(&self, t: f64) -> f32 {
+        let n = self.rhythm.len();
+        if n == 0 || !t.is_finite() || self.rhythm_hop <= 0.0 {
+            return 0.0;
+        }
+        let x = (t / self.rhythm_hop).clamp(0.0, (n - 1) as f64);
+        let i = x.floor() as usize;
+        let j = (i + 1).min(n - 1);
+        let f = (x - i as f64) as f32;
+        self.rhythm[i] * (1.0 - f) + self.rhythm[j] * f
+    }
+
     /// Smoothed energy (0..=1) at `t`, as used for drops and sections.
     pub fn energy_at(&self, t: f64) -> f32 {
         self.features_at(t).energy()
@@ -329,5 +371,23 @@ impl FeatureProvider for Analysis {
 
     fn duration(&self) -> Option<f64> {
         Some(self.duration)
+    }
+
+    fn rhythm_confidence_at(&self, t: f64) -> Option<f32> {
+        Some(self.rhythm_at(t))
+    }
+
+    fn events_with_strength(&self, t0: f64, t1: f64) -> (u8, f32) {
+        let flags = self.events_in(t0, t1);
+        if flags & music_flags::ONSET == 0 {
+            return (flags, 0.0);
+        }
+        let a = self.onsets.partition_point(|o| o.time <= t0);
+        let b = self.onsets.partition_point(|o| o.time <= t1);
+        let strength = self.onsets[a..b.max(a)]
+            .iter()
+            .map(|o| o.strength)
+            .fold(0.0, f32::max);
+        (flags, strength)
     }
 }
