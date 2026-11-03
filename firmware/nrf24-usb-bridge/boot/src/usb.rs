@@ -64,25 +64,22 @@ pub fn run(app_ok: bool) -> ! {
         .unwrap()
         .build();
 
+    // Milliseconds since entering DFU mode, from the cycle counter.
     let per_ms = sysclk / 1000;
     let (mut last, mut ms) = (DWT::cycle_count(), 0u32);
-    let mut reboot_at = None;
+    let mut reboot_since = None;
     loop {
         dev.poll(&mut [&mut dfu]);
 
         let dt = DWT::cycle_count().wrapping_sub(last);
-        if dt >= per_ms {
-            ms = ms.wrapping_add(dt / per_ms);
-            last = last.wrapping_add(dt / per_ms * per_ms);
-        }
+        ms = ms.wrapping_add(dt / per_ms);
+        last = last.wrapping_add(dt / per_ms * per_ms);
         let phase = ms % 1000;
         hw::led(if app_ok { phase < 60 || (180..240).contains(&phase) } else { phase % 200 < 100 });
 
-        if REBOOT.load(Ordering::Relaxed) {
-            let at = *reboot_at.get_or_insert(ms.wrapping_add(100));
-            if ms.wrapping_sub(at) < u32::MAX / 2 {
-                SCB::sys_reset();
-            }
+        // Give the host's last GETSTATUS time to complete, then start the app.
+        if REBOOT.load(Ordering::Relaxed) && ms.wrapping_sub(*reboot_since.get_or_insert(ms)) >= 100 {
+            SCB::sys_reset();
         }
     }
 }

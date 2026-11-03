@@ -25,6 +25,7 @@ mod layout;
 mod mesh;
 mod render;
 
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
@@ -48,6 +49,12 @@ pub const SNAP: f32 = 0.05;
 
 /// LED colour → HDR scale (saturated LEDs land in the bloom range).
 const LED_INTENSITY: f32 = 6.0;
+
+/// LED display smoothing: time constant of each of the two low-pass stages.
+const LED_SMOOTH_TAU: f32 = 0.1;
+/// A channel that moves more than this many levels in one frame is a real
+/// change (strobe, blink, onset) and snaps instead of being smoothed.
+const LED_SNAP_LEVELS: i16 = 4;
 
 /// Design tokens used by the stage (`docs/UI_DESIGN.md` §2.1).
 pub mod theme {
@@ -163,6 +170,55 @@ pub struct Stage {
     fit: Option<(f32, f32)>,
     drag: Option<BoxDrag>,
     last_aspect: f32,
+    /// Per-gift LED display smoothing (see [`LedSmooth`]).
+    leds: HashMap<u64, LedSmooth>,
+}
+
+/// Hides 8-bit quantisation in the 3D view. Dim, slow looks (an idle
+/// rainbow peaks around 33/255 after brightness limits) step one level every
+/// few hundred ms, which the HDR mapping and bloom make look like stutter.
+/// Small changes go through a two-stage low-pass; jumps snap.
+struct LedSmooth {
+    prev: [Rgb; LEDS_PER_GIFT],
+    /// Two cascaded one-pole stages, in LED levels (0–255, fractional).
+    s1: [[f32; 3]; LEDS_PER_GIFT],
+    s2: [[f32; 3]; LEDS_PER_GIFT],
+}
+
+impl LedSmooth {
+    fn new(leds: [Rgb; LEDS_PER_GIFT]) -> Self {
+        let v = leds.map(|c| [c.r as f32, c.g as f32, c.b as f32]);
+        Self { prev: leds, s1: v, s2: v }
+    }
+
+    fn update(&mut self, leds: [Rgb; LEDS_PER_GIFT], dt: f32) {
+        let a = 1.0 - (-dt / LED_SMOOTH_TAU).exp();
+        for (((c, p), s1), s2) in leds.iter().zip(&self.prev).zip(&mut self.s1).zip(&mut self.s2) {
+            let x = [c.r as f32, c.g as f32, c.b as f32];
+            let jump = [(c.r, p.r), (c.g, p.g), (c.b, p.b)]
+                .iter()
+                .any(|&(n, o)| (n as i16 - o as i16).abs() > LED_SNAP_LEVELS);
+            if jump {
+                *s1 = x;
+                *s2 = x;
+            } else {
+                for ((x, s1), s2) in x.iter().zip(s1.iter_mut()).zip(s2.iter_mut()) {
+                    *s1 += (x - *s1) * a;
+                    *s2 += (*s1 - *s2) * a;
+                }
+            }
+        }
+        self.prev = leds;
+    }
+
+    /// Still gliding towards the latest colours.
+    fn settling(&self) -> bool {
+        self.s2.iter().zip(self.prev).any(|(s, c)| {
+            (s[0] - c.r as f32).abs() > 0.05
+                || (s[1] - c.g as f32).abs() > 0.05
+                || (s[2] - c.b as f32).abs() > 0.05
+        })
+    }
 }
 
 impl Drop for Stage {
@@ -216,6 +272,7 @@ impl Stage {
             fit: None,
             drag: None,
             last_aspect: 1.6,
+            leds: HashMap::new(),
         }
     }
 
@@ -446,7 +503,15 @@ impl Stage {
             self.camera.goal.yaw += 2f32.to_radians() * dt;
         }
         let moving = self.camera.update(dt);
-        if moving || opts.performance || self.drag.is_some() {
+        self.leds.retain(|id, _| gifts.iter().any(|g| g.id == *id));
+        for g in gifts {
+            self.leds
+                .entry(g.id)
+                .and_modify(|s| s.update(g.leds, dt))
+                .or_insert_with(|| LedSmooth::new(g.leds));
+        }
+        let settling = self.leds.values().any(LedSmooth::settling);
+        if moving || settling || opts.performance || self.drag.is_some() {
             ui.ctx().request_repaint();
         }
         if cam_input && !response.double_clicked() || self.drag.is_some() {
@@ -507,8 +572,11 @@ impl Stage {
                 let p = self.gift_pos(g);
                 let mut leds = [[0.0f32; 4]; 4];
                 if g.online {
-                    for (dst, c) in leds.iter_mut().zip(g.leds) {
-                        let l = srgb_to_linear_rgb(c).map(|v| v * LED_INTENSITY);
+                    let smooth = self.leds.get(&g.id).map(|s| s.s2);
+                    for (i, dst) in leds.iter_mut().enumerate() {
+                        let c = g.leds[i];
+                        let v = smooth.map_or([c.r as f32, c.g as f32, c.b as f32], |s| s[i]);
+                        let l = v.map(|x| srgb_to_linear(x / 255.0) * LED_INTENSITY);
                         *dst = [l[0], l[1], l[2], 0.0];
                     }
                 }
@@ -730,6 +798,27 @@ const _: () = {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn led_smoothing_glides_steps_and_snaps_jumps() {
+        let c = |v: u8| [Rgb::new(v, 0, 0); LEDS_PER_GIFT];
+        let dt = 1.0 / 60.0;
+        // A dim slow ramp: one level every 15 frames.
+        let mut s = LedSmooth::new(c(30));
+        let mut out = Vec::new();
+        for f in 0..240 {
+            s.update(c(30 + (f / 15) as u8), dt);
+            out.push(s.s2[0][0]);
+        }
+        // Monotonic, and it moves on most frames instead of in 1-level steps.
+        assert!(out.windows(2).all(|w| w[1] >= w[0]));
+        let max_step = out.windows(2).map(|w| w[1] - w[0]).fold(0.0, f32::max);
+        assert!(max_step < 0.35, "max step {max_step}");
+        // A big change (strobe) is shown immediately.
+        s.update(c(200), dt);
+        assert_eq!(s.s2[0][0], 200.0);
+        assert!(!s.settling());
+    }
 
     #[test]
     fn ray_hits_box_from_above() {

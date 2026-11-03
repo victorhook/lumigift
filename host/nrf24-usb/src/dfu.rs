@@ -122,17 +122,17 @@ pub fn parse_layout(s: &str) -> Option<Vec<Region>> {
         let pages: u32 = count.trim().parse().ok()?;
         let digits = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
         let mut size: u32 = rest[..digits].parse().ok()?;
-        let mut tail = rest[digits..].chars();
-        let mut kind = tail.next()?;
-        match kind {
-            'K' => size *= 1024,
-            'M' => size *= 1024 * 1024,
-            ' ' | 'B' => {}
-            _ => {}
+        // Optional size suffix (K, M, B or space), then the access letter.
+        let mut tail = rest[digits..].chars().peekable();
+        size *= match tail.peek()? {
+            'K' => 1024,
+            'M' => 1024 * 1024,
+            _ => 1,
+        };
+        if matches!(tail.peek(), Some('K' | 'M' | 'B' | ' ')) {
+            tail.next();
         }
-        if matches!(kind, 'K' | 'M' | ' ' | 'B') {
-            kind = tail.next()?;
-        }
+        let kind = tail.next()?;
         // DfuSe letters a..g: bit 0 readable, bit 1 erasable, bit 2 writable.
         let bits = (kind as u32).checked_sub('a' as u32 - 1)?;
         out.push(Region { start: addr, pages, page_size: size, writable: bits & 4 != 0 });
@@ -405,16 +405,17 @@ fn wait_for(pid: u16, serial: Option<&str>) -> Result<nusb::DeviceInfo> {
     }
 }
 
-/// Open a device that may have just enumerated: udev grants access (the
-/// `uaccess` ACL) a moment after the device appears, so retry briefly.
-fn open_retrying(info: &nusb::DeviceInfo) -> Result<nusb::Device> {
+/// Run `open` on a device that may have just enumerated: udev grants access
+/// (the `uaccess` ACL) a moment after the device appears, so permission
+/// errors are retried for a few seconds.
+fn with_access<T>(mut open: impl FnMut() -> Result<T>) -> Result<T> {
     let deadline = Instant::now() + Duration::from_secs(3);
     loop {
-        match info.open().wait() {
-            Err(e) if e.kind() == nusb::ErrorKind::PermissionDenied && Instant::now() < deadline => {
+        match open() {
+            Err(Error::PermissionDenied(_)) if Instant::now() < deadline => {
                 std::thread::sleep(Duration::from_millis(50));
             }
-            r => return Ok(r?),
+            r => return r,
         }
     }
 }
@@ -441,20 +442,18 @@ pub fn update(fw: &Firmware, serial: Option<&str>, progress: &mut dyn FnMut(Phas
                 Error::Dfu("this bridge firmware has no USB update support; flash it once over SWD".into())
             })?;
         {
-            let dev = open_retrying(&info)?;
-            log::debug!("dfu: opened app ({:?})", t0.elapsed());
+            let dev = with_access(|| Ok(info.open().wait()?))?;
             let intf = dev.detach_and_claim_interface(rt).wait()?;
-            log::debug!("dfu: claimed runtime interface {rt} ({:?})", t0.elapsed());
             // The bridge resets ~20 ms after accepting; a lost status stage is fine.
             let r = UsbIo { intf, index: rt as u16 }.control_out(dfu::DETACH, 1000, &[]);
-            log::debug!("dfu: DETACH -> {r:?} ({:?})", t0.elapsed());
+            log::debug!("dfu: DETACH -> {r:?}");
         }
         info = wait_for(dfu::USB_PID, serial.as_deref())?;
-        log::debug!("dfu: bootloader enumerated ({:?})", t0.elapsed());
+        log::debug!("dfu: bootloader enumerated after {:?}", t0.elapsed());
         progress(Phase::Detach, 1, 1);
     }
 
-    let dev = open_retrying(&info)?;
+    let dev = with_access(|| Ok(info.open().wait()?))?;
     let (if_num, string_index, transfer_size) = {
         let cfg = dev.active_configuration().map_err(|e| Error::Usb(e.to_string()))?;
         let alt = cfg
@@ -497,17 +496,11 @@ pub fn update(fw: &Firmware, serial: Option<&str>, progress: &mut dyn FnMut(Phas
     drop(dfu);
     drop(dev);
 
-    let fw_version = wait_for(proto::USB_PID, serial.as_deref()).ok().and_then(|_| {
-        // Access is granted by udev a moment after the device appears.
-        let deadline = Instant::now() + Duration::from_secs(3);
-        loop {
-            match Bridge::open(serial.as_deref()) {
-                Ok(mut b) => return b.get_info(Duration::from_secs(1)).ok().map(|i| i.fw_version),
-                Err(_) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(50)),
-                Err(_) => return None,
-            }
-        }
-    });
+    let fw_version = wait_for(proto::USB_PID, serial.as_deref())
+        .and_then(|_| with_access(|| Bridge::open(serial.as_deref())))
+        .and_then(|mut b| b.get_info(Duration::from_secs(1)))
+        .map(|i| i.fw_version)
+        .ok();
     progress(Phase::Restart, 1, 1);
     Ok(Report { serial, base, bytes: fw.data.len(), elapsed: t0.elapsed(), fw_version })
 }

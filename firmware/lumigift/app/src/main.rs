@@ -116,7 +116,6 @@ struct App {
     low_batt: bool,
     temp_c: i8,
 
-    reply_is_status: bool,
     /// Last command reply and how many more polls still return it.
     pending: Option<(Reply, u8)>,
     pending_channel: Option<(u32, u8)>,
@@ -188,7 +187,6 @@ fn main() -> ! {
         vbat_mv: 0,
         low_batt: false,
         temp_c: 0,
-        reply_is_status: false,
         pending: None,
         pending_channel: None,
         reboot_at: None,
@@ -225,11 +223,11 @@ impl App {
                 self.render(now);
             }
 
+            // 100 ms without unicast traffic: any command reply is stale (its
+            // poll comes within milliseconds), so refresh the status.
             if elapsed(now, self.t_status, STATUS_REFRESH_MS) {
                 self.t_status = now;
-                if self.reply_is_status {
-                    self.preload_status();
-                }
+                self.preload_status();
             }
 
             if elapsed(now, self.t_adc, ADC_PERIOD_MS) {
@@ -331,7 +329,6 @@ impl App {
                     }
                 },
             };
-            self.reply_is_status = self.pending.is_none();
             radio::preload(r, &reply);
             self.t_status = now;
         }
@@ -505,12 +502,13 @@ impl App {
         }
     }
 
-    /// Refresh the pending ack payload with current counters.
+    /// Refresh the pending ack payload with current counters (replacing any
+    /// command reply).
     fn preload_status(&mut self) {
+        self.pending = None;
         let st = Reply::Status(self.status());
         if let Some(r) = self.radio.as_mut() {
             radio::preload(r, &st);
-            self.reply_is_status = true;
         }
     }
 
