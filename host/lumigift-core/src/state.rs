@@ -74,6 +74,8 @@ pub(crate) struct Gift {
     pub status_at: Option<Instant>,
     pub reboots_seen: u32,
     pub last_reboot: Option<Instant>,
+    /// When it last went from offline / asleep to online.
+    pub online_since: Option<Instant>,
     polls: VecDeque<(Instant, bool, u8)>,
     pub polls_ok: u64,
     pub polls_failed: u64,
@@ -104,6 +106,7 @@ impl Gift {
             status_at: None,
             reboots_seen: 0,
             last_reboot: None,
+            online_since: None,
             polls: VecDeque::new(),
             polls_ok: 0,
             polls_failed: 0,
@@ -150,7 +153,16 @@ impl Gift {
             rx += b.2;
             lost += b.3;
         }
-        let pct = (sent > 0).then(|| (rx as f32 * 100.0 / sent as f32).min(100.0));
+        // The gift's own counters (frames received, sequence gaps) are exact.
+        // Comparing with the frames sent instead depends on matching each
+        // status to the right moment, which a status refreshed between polls
+        // skews: single windows then read low and kept "Missing frames" lit.
+        // The sent count only covers a gift that hears nothing at all.
+        let pct = if rx + lost > 0 {
+            Some(rx as f32 * 100.0 / (rx + lost) as f32)
+        } else {
+            (sent > 0).then_some(0.0)
+        };
         (pct, lost)
     }
 }
@@ -273,6 +285,7 @@ impl State {
         let woke = std::mem::take(&mut g.asleep);
         if !g.online {
             g.online = true;
+            g.online_since = Some(now);
             let addr = g.node_addr;
             let what = if woke { "awake" } else { "online" };
             self.log(
@@ -621,6 +634,7 @@ impl State {
                     temp_c: s.temp_c,
                     reboots_seen: g.reboots_seen,
                     last_reboot: g.last_reboot,
+                    online_since: g.online_since,
                     poll_success_pct: if pct.is_nan() { 0.0 } else { pct },
                     avg_retries: if retries.is_nan() { 0.0 } else { retries },
                     bcast_rx_pct: bc,

@@ -414,6 +414,9 @@ pub struct GiftView {
     /// Reboots the host noticed (uptime going backwards).
     pub reboots_seen: u32,
     pub last_reboot: Option<Instant>,
+    /// When it last went from offline / asleep to online (its clock may
+    /// still be re-acquiring the bridge's for a few seconds after).
+    pub online_since: Option<Instant>,
     /// Poll success over the last ~2 s, 0..=100.
     pub poll_success_pct: f32,
     /// Average auto-retransmits of successful polls (last ~2 s).

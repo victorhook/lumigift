@@ -12,6 +12,8 @@ use crate::theme::*;
 
 const ENTER: Duration = Duration::from_secs(3);
 const EXIT: Duration = Duration::from_secs(10);
+/// No clock / frame warnings this long after a gift came online or rebooted.
+const SETTLE: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
 pub enum Level {
@@ -194,7 +196,11 @@ impl HealthTracker {
             Level::Normal
         };
         let streaming = self.show_active;
-        let bcast_raw = match g.bcast_rx_pct.filter(|_| streaming) {
+        // A gift that just came online (woke up, booted) re-acquires the
+        // bridge's clock and its frame counters for a few seconds.
+        let settling = g.online_since.is_none_or(|t| now.duration_since(t) < SETTLE)
+            || g.last_reboot.is_some_and(|t| now.duration_since(t) < SETTLE);
+        let bcast_raw = match g.bcast_rx_pct.filter(|_| streaming && !settling) {
             Some(p) if g.online && p < 85.0 => Level::Critical,
             Some(p) if g.online && p < 95.0 => Level::Warn,
             _ => Level::Normal,
@@ -206,6 +212,7 @@ impl HealthTracker {
         };
         let synced = g.flags & status_flags::TIME_SYNCED != 0;
         let sync_raw = if g.online
+            && !settling
             && g.status.is_some()
             && (g.sync_err_us >= 500 || (!synced && g.uptime > Duration::from_secs(5)))
         {
