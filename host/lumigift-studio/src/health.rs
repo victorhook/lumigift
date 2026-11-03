@@ -38,6 +38,8 @@ pub enum State {
     Critical(String),
     Reconnecting,
     Offline(Option<Duration>),
+    /// Dozing after "Sleep all" (LEDs off, not answering): neutral, like Offline.
+    Asleep,
     Updating(String),
 }
 
@@ -49,7 +51,8 @@ impl State {
             State::Updating(_) => 2,
             State::Reconnecting => 3,
             State::Online => 4,
-            State::Offline(_) => 5,
+            State::Asleep => 5,
+            State::Offline(_) => 6,
         }
     }
     pub fn needs_attention(&self) -> bool {
@@ -57,6 +60,10 @@ impl State {
     }
     pub fn is_offline(&self) -> bool {
         matches!(self, State::Offline(_))
+    }
+    /// Not answering (offline or asleep): tiles dim their values.
+    pub fn is_dormant(&self) -> bool {
+        matches!(self, State::Offline(_) | State::Asleep)
     }
 }
 
@@ -298,6 +305,8 @@ impl HealthTracker {
         let since_seen = g.last_seen.map(|t| now.saturating_duration_since(t));
         let (state, sentence) = if let Some(ph) = ota_phase {
             (State::Updating(ph.clone()), format!("Updating firmware: {ph}."))
+        } else if g.asleep {
+            (State::Asleep, "Asleep: dozing to save its battery. Wake all gifts to bring it back.".to_string())
         } else if !g.online {
             match since_seen {
                 Some(d) if d < Duration::from_secs(5) => {

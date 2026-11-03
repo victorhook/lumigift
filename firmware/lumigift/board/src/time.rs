@@ -2,15 +2,20 @@
 //!
 //! [`now_us`] folds a pending overflow into the high word itself, so it
 //! works polled (bootloader: call at least every 65 ms) and from the
-//! TIM14 update interrupt (app: [`enable_irq`] + call [`on_irq`]).
+//! TIM14 update interrupt (app: [`enable_irq`] + call [`on_irq`]). The app
+//! also gets a 1 kHz compare tick so its main loop can sleep (WFI) between
+//! ticks, and [`resume`] sets the clock after a doze on the 32 kHz LSI.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-use crate::pac::timer::regs::{ArrCore, Sr1ch};
+use crate::pac::timer::regs::{ArrCore, Ccr1ch, CntCore, Sr1ch};
 use crate::pac::timer::vals::Urs;
 use crate::pac::{RCC, TIM14};
 
 static OVERFLOWS: AtomicU32 = AtomicU32::new(0);
+
+/// Period of the compare tick that wakes a sleeping main loop.
+const TICK_US: u32 = 1000;
 
 pub fn init() {
     RCC.apbenr2().modify(|w| w.set_tim14en(true));
@@ -55,14 +60,38 @@ pub fn delay_us(us: u32) {
     while now_us().wrapping_sub(t0) < us {}
 }
 
-/// Enable the TIM14 update interrupt (app).
+/// Enable the TIM14 update and 1 kHz tick interrupts (app).
 pub fn enable_irq() {
-    TIM14.dier().modify(|w| w.set_uie(true));
-    // SAFETY: the handler only touches the atomics above.
+    arm_tick();
+    TIM14.dier().modify(|w| {
+        w.set_uie(true);
+        w.set_ccie(0, true);
+    });
+    // SAFETY: the handler only touches the atomics above and TIM14.
     unsafe { cortex_m::peripheral::NVIC::unmask(crate::pac::Interrupt::TIM14) };
+}
+
+fn arm_tick() {
+    let next = (TIM14.cnt().read().cnt() as u32 + TICK_US) & 0xFFFF;
+    TIM14.ccr(0).write_value(Ccr1ch(next));
 }
 
 /// Call from the TIM14 interrupt handler.
 pub fn on_irq() {
     let _ = snapshot();
+    if TIM14.sr().read().ccif(0) {
+        let mut clear = Sr1ch(!0);
+        clear.set_ccif(0, false);
+        TIM14.sr().write_value(clear);
+        arm_tick();
+    }
+}
+
+/// Set the clock to `us` after a doze (TIM14 ran from the 32 kHz LSI
+/// meanwhile, so its count is meaningless). Call with interrupts masked.
+pub fn resume(us: u32) {
+    OVERFLOWS.store(us >> 16, Ordering::Relaxed);
+    TIM14.cnt().write_value(CntCore(us & 0xFFFF));
+    TIM14.sr().write_value(Sr1ch(0));
+    arm_tick();
 }

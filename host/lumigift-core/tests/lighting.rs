@@ -22,6 +22,8 @@ fn start(slots: &[u8]) -> (Link, SimHandle) {
     }
     let cfg = LinkConfig {
         metadata: MetadataLocation::Disabled,
+        // Nothing dozes here; skip the 1.3 s Wake burst on connect.
+        wake_on_connect: false,
         ..Default::default()
     };
     let (link, sim) = Link::simulated(cfg, sc);

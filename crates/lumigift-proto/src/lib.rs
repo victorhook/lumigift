@@ -160,6 +160,8 @@ pub mod kind {
     pub const SET_NODE_ADDR: u8 = 0x10;
     pub const BOOT_HOLD: u8 = 0x11;
     pub const ENTER_BOOT: u8 = 0x12;
+    pub const SLEEP: u8 = 0x13;
+    pub const WAKE: u8 = 0x14;
     // OTA (valid broadcast or unicast).
     pub const OTA_BEGIN: u8 = 0x20;
     pub const OTA_CHUNK: u8 = 0x21;
@@ -347,6 +349,11 @@ pub enum Broadcast {
         count: u8,
         addrs: [u8; ENTER_BOOT_MAX],
     },
+    /// Every gift dozes (see [`doze`]) until it hears [`Broadcast::Wake`].
+    Sleep,
+    /// Wakes dozing gifts. Sent back to back for [`doze::WAKE_BURST_MS`] so
+    /// it falls into every gift's listen window; a no-op for awake gifts.
+    Wake,
     OtaBegin(OtaBegin),
     OtaChunk(OtaChunk),
 }
@@ -391,6 +398,21 @@ pub mod config_key {
     /// later, so the host can still collect the `ConfigResult`.
     pub const CHANNEL: u8 = 4;
     pub const CHANNEL_SWITCH_DELAY_MS: u32 = 1000;
+}
+
+/// Low-power doze. A dozing gift keeps its LEDs off, its nRF in standby and
+/// its MCU on the 32 kHz LSI clock, and turns the receiver on for
+/// [`LISTEN_US`] every [`PERIOD_MS`]. Only [`Broadcast::Wake`] (or a unicast
+/// to it) wakes it; show frames and beacons do not.
+pub mod doze {
+    pub const PERIOD_MS: u32 = 1000;
+    pub const LISTEN_US: u32 = 2000;
+    /// Length of the host's `Wake` burst: a full period plus a window, with
+    /// margin for the gifts' ±10 % LSI.
+    pub const WAKE_BURST_MS: u32 = 1300;
+    /// A gift dozes by itself after this long without any valid packet from
+    /// a host (the host polls connected gifts several times a second).
+    pub const AUTO_AFTER_MS: u32 = 60_000;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -692,6 +714,8 @@ impl Packet {
                     w.bytes(&[node_addr]);
                 }
                 Broadcast::BootHold => w.bytes(&[kind::BOOT_HOLD]),
+                Broadcast::Sleep => w.bytes(&[kind::SLEEP]),
+                Broadcast::Wake => w.bytes(&[kind::WAKE]),
                 Broadcast::EnterBootloader { count, addrs } => {
                     let n = (count as usize).min(ENTER_BOOT_MAX);
                     w.bytes(&[kind::ENTER_BOOT, n as u8]);
@@ -822,6 +846,8 @@ impl Packet {
                 node_addr: r.u8()?,
             }),
             kind::BOOT_HOLD => Packet::Broadcast(Broadcast::BootHold),
+            kind::SLEEP => Packet::Broadcast(Broadcast::Sleep),
+            kind::WAKE => Packet::Broadcast(Broadcast::Wake),
             kind::ENTER_BOOT => {
                 let n = r.u8()? as usize;
                 if n > ENTER_BOOT_MAX || r.0.len() < n {
@@ -1146,6 +1172,8 @@ mod tests {
             node_addr: 9,
         }));
         rt(Packet::Broadcast(Broadcast::BootHold));
+        rt(Packet::Broadcast(Broadcast::Sleep));
+        rt(Packet::Broadcast(Broadcast::Wake));
         assert_eq!(
             rt(Packet::Broadcast(Broadcast::enter_bootloader(&[7; 40]))),
             32

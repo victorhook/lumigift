@@ -49,6 +49,7 @@ fn tile_status(h: &Health) -> (Option<&'static str>, String, Color32, Color32) {
             TEXT_FAINT,
             SURFACE_3,
         ),
+        State::Asleep => (Some(icons::MOON), "Asleep".into(), TEXT_MUTED, SURFACE_3),
         State::Updating(ph) => (Some(icons::DOWNLOAD), ph.clone(), INFO, INFO_SOFT),
     }
 }
@@ -117,6 +118,7 @@ fn matches_filter(app: &App, g: &GiftView, f: &str, attention: bool) -> bool {
 pub fn page(app: &mut App, ui: &mut Ui) {
     let total = app.snap.gifts.len();
     let online = app.snap.online_count();
+    let asleep = app.snap.asleep_count();
     let attention = app.health.values().filter(|h| h.state.needs_attention()).count();
 
     // Keyboard (only when no text field has focus).
@@ -156,7 +158,8 @@ pub fn page(app: &mut App, ui: &mut Ui) {
 
     App::page_header(ui, "Fleet", |ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
-        widgets::text(ui, format!("{total} gifts · {online} online"), "body", TEXT_MUTED);
+        let summary = if asleep > 0 { format!("{total} gifts · {online} online · {asleep} asleep") } else { format!("{total} gifts · {online} online") };
+        widgets::text(ui, summary, "body", TEXT_MUTED);
         if attention > 0 {
             widgets::text(ui, "·", "body", TEXT_MUTED);
             let r = widgets::text_button(ui, &format!("{attention} need{} attention", if attention == 1 { "s" } else { "" }), WARN);
@@ -180,6 +183,23 @@ pub fn page(app: &mut App, ui: &mut Ui) {
                 .clicked()
             {
                 app.rescan();
+            }
+            // Doze: "Wake all" while any gift sleeps (or a wake runs), else "Sleep all".
+            let busy = app.link().is_some_and(|l| l.ota_running());
+            if app.snap.waking {
+                let _ = widgets::secondary_button(ui, Some(icons::SPINNER), "Waking…", false);
+            } else if asleep > 0 {
+                if widgets::secondary_button(ui, Some(icons::SUN), "Wake all", app.connected() && !busy)
+                    .on_hover_text("Wake every dozing gift (takes about 1.5 s)")
+                    .clicked()
+                {
+                    app.wake_all();
+                }
+            } else if widgets::secondary_button(ui, Some(icons::MOON), "Sleep all", app.connected() && online > 0 && !busy)
+                .on_hover_text("Put every gift to sleep to save batteries: LEDs off, radio mostly off")
+                .clicked()
+            {
+                app.sleep_all();
             }
             let mut view = app.persist.fleet_list_view as usize;
             if widgets::segmented(ui, "fleet-view", &mut view, &[icons::GRID, icons::ROWS]) {
@@ -401,7 +421,8 @@ fn tile(app: &mut App, ui: &mut Ui, visible: &[Uid], uid: Uid, size: egui::Vec2,
         return;
     }
     let selected = app.selection.contains(&uid);
-    let offline = h.state.is_offline();
+    // Asleep tiles dim like offline ones (but keep a solid border).
+    let offline = h.state.is_dormant();
     let id = egui::Id::unique(("tile", uid));
     let hov_t = ui.ctx().animate_bool_with_time(id.with("h"), resp.hovered(), MOTION_FAST);
     let sel_t = ui.ctx().animate_bool_with_time(id.with("s"), selected, MOTION_BASE);
@@ -973,7 +994,13 @@ fn summary_inspector(app: &mut App, ui: &mut Ui) {
         .collect();
     ui.add_space(S5);
     ui.horizontal(|ui| {
-        for (v, l) in [(format!("{online}"), "online"), (format!("{}", total - online), "offline"), (format!("{}", att.len()), "attention")] {
+        let asleep = app.snap.asleep_count();
+        let mut stats = vec![(format!("{online}"), "online"), (format!("{}", total - online - asleep), "offline")];
+        if asleep > 0 {
+            stats.push((format!("{asleep}"), "asleep"));
+        }
+        stats.push((format!("{}", att.len()), "attention"));
+        for (v, l) in stats {
             ui.vertical(|ui| {
                 ui.set_width(96.0);
                 widgets::text(ui, v, "metric", TEXT);

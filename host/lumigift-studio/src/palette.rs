@@ -28,6 +28,8 @@ pub enum PaletteAction {
     Reboot(Uid),
     RebootAll,
     Rescan,
+    SleepAll,
+    WakeAll,
     AutoAssign,
     StartSim,
     OpenAudio,
@@ -106,6 +108,8 @@ pub fn build_commands(app: &App) -> Vec<Command> {
     v.push(cmd("Gifts", icons::REBOOT, "Reboot all gifts…", None, A::RebootAll));
     v.push(cmd("Gifts", icons::SEARCH, "Rescan for gifts", Some("Ctrl+R"), A::Rescan));
     v.push(cmd("Gifts", icons::LIST_NUMBERS, "Auto-assign slots", None, A::AutoAssign));
+    v.push(cmd("Gifts", icons::MOON, "Sleep all gifts", None, A::SleepAll));
+    v.push(cmd("Gifts", icons::SUN, "Wake all gifts", None, A::WakeAll));
     v.push(cmd("Show", icons::FILE_AUDIO, "Open audio file…", Some("Ctrl+Shift+O"), A::OpenAudio));
     v.push(cmd("Show", icons::FOLDER_OPEN, "Open show…", Some("Ctrl+O"), A::OpenShow));
     v.push(cmd("Show", icons::SAVE, "Save show", Some("Ctrl+S"), A::SaveShow));

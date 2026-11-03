@@ -96,6 +96,13 @@ pub enum ShowOutput {
     Idle,
 }
 
+impl ShowOutput {
+    /// Something the gifts should light up for (not `Idle` / `Blackout`).
+    pub fn is_active(&self) -> bool {
+        !matches!(self, ShowOutput::Idle | ShowOutput::Blackout)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Errors and async results
 // ---------------------------------------------------------------------------
@@ -289,6 +296,8 @@ pub struct Snapshot {
     pub events: Arc<Vec<LogEvent>>,
     /// True while the show stream is paused (e.g. during OTA).
     pub show_paused: bool,
+    /// A `Wake` burst (and the polls after it) is running.
+    pub waking: bool,
 }
 
 impl Default for Snapshot {
@@ -302,6 +311,7 @@ impl Default for Snapshot {
             ota: None,
             events: Arc::new(Vec::new()),
             show_paused: false,
+            waking: false,
         }
     }
 }
@@ -312,6 +322,9 @@ impl Snapshot {
     }
     pub fn online_count(&self) -> usize {
         self.gifts.iter().filter(|g| g.online).count()
+    }
+    pub fn asleep_count(&self) -> usize {
+        self.gifts.iter().filter(|g| g.asleep).count()
     }
     /// Resolve a user-typed gift reference to UIDs. Accepted forms:
     ///
@@ -380,6 +393,10 @@ pub struct GiftView {
     /// (`None` before it was identified or without a valid image).
     pub app_crc: Option<u32>,
     pub online: bool,
+    /// Dozing (see `lumigift_proto::doze`): this host put it to sleep and
+    /// has not heard from it since. `online` is false; asleep gifts are not
+    /// polled (they cannot answer) and are not offline either.
+    pub asleep: bool,
     pub first_seen: Instant,
     pub last_seen: Option<Instant>,
     /// Latest raw status.

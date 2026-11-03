@@ -145,6 +145,8 @@ pub enum OpKind {
     Report(Pending<lumigift_core::CmdReport>),
     Unit(Pending<()>),
     Count(Pending<usize>),
+    /// Sleep all / wake all: the count goes into `Op::success` (`{n}`).
+    Gifts(Pending<usize>),
 }
 
 #[derive(Clone)]
@@ -396,6 +398,18 @@ impl App {
         self.push_op("Rescan", String::new(), OpKind::Count(p));
     }
 
+    pub fn sleep_all(&mut self) {
+        let Some(link) = self.link().cloned() else { return };
+        let p = link.sleep_all();
+        self.push_op("Sleep all", "{n} asleep", OpKind::Gifts(p));
+    }
+
+    pub fn wake_all(&mut self) {
+        let Some(link) = self.link().cloned() else { return };
+        let p = link.wake_all();
+        self.push_op("Wake all", "{n} online", OpKind::Gifts(p));
+    }
+
     pub fn auto_assign(&mut self) {
         let Some(link) = self.link().cloned() else { return };
         let p = link.auto_assign_slots(lumigift_core::SlotAssign::KeepExisting);
@@ -500,6 +514,7 @@ impl App {
                     Err(e) => Err(e.to_string()),
                 }),
                 OpKind::Unit(p) => p.try_take().map(|r| r.map(|_| op.success.clone()).map_err(|e| e.to_string())),
+                OpKind::Gifts(p) => p.try_take().map(|r| r.map(|n| op.success.replace("{n}", &format!("{n} gift{}", plural(n)))).map_err(|e| e.to_string())),
                 OpKind::Count(p) => p.try_take().map(|r| r.map(|n| if n > 0 { format!("Found {n} new gift{}", plural(n)) } else { "Rescan complete: no new gifts".into() }).map_err(|e| e.to_string())),
             };
             if let Some(r) = res {
@@ -1102,6 +1117,8 @@ impl App {
             A::Reboot(u) => self.reboot(vec![u], false),
             A::RebootAll => self.confirm = Some(Confirm::RebootAll),
             A::Rescan => self.rescan(),
+            A::SleepAll => self.sleep_all(),
+            A::WakeAll => self.wake_all(),
             A::AutoAssign => self.auto_assign(),
             A::StartSim => self.start_sim(self.persist.sim_count),
             A::OpenAudio => self.studio.pick_audio(),

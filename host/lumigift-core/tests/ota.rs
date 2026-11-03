@@ -18,6 +18,8 @@ const APP_LEN: usize = 15_532;
 fn cfg() -> LinkConfig {
     LinkConfig {
         metadata: MetadataLocation::Disabled,
+        // Nothing dozes here; skip the 1.3 s Wake burst on connect.
+        wake_on_connect: false,
         ..Default::default()
     }
 }

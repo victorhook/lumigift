@@ -150,14 +150,15 @@ enum Exclusion {
 
 fn exclusion(app: &App, uid: &Uid) -> Exclusion {
     let Some(g) = app.snap.gift(uid) else { return Exclusion::Offline };
-    if !g.online {
+    // Asleep gifts can be updated: the update wakes its targets first.
+    if !g.online && !g.asleep {
         return Exclusion::Offline;
     }
     let v = app.health.get(uid).and_then(|h| h.vbat_median_mv).unwrap_or(g.vbat_mv as f32);
     if v > 0.0 && v < 1150.0 {
         return Exclusion::LowBattery;
     }
-    if g.poll_success_pct < 70.0 {
+    if g.online && g.poll_success_pct < 70.0 {
         return Exclusion::WeakLink;
     }
     Exclusion::None
@@ -293,12 +294,12 @@ fn targets(app: &mut App, ui: &mut Ui) {
         ui.add_space(12.0);
         widgets::text(ui, "Select:", "small", TEXT_FAINT);
         if widgets::text_button(ui, "All", ACCENT_TEXT).clicked() {
-            app.firmware.targets = gifts.iter().filter(|g| g.online).map(|g| g.uid).collect();
+            app.firmware.targets = gifts.iter().filter(|g| g.online || g.asleep).map(|g| g.uid).collect();
             app.firmware.touched = true;
         }
         widgets::text(ui, "·", "small", TEXT_FAINT);
         if widgets::text_button(ui, "Outdated", ACCENT_TEXT).clicked() {
-            app.firmware.targets = gifts.iter().filter(|g| g.online && new_ver.is_some_and(|v| g.fw_version < v)).map(|g| g.uid).collect();
+            app.firmware.targets = gifts.iter().filter(|g| (g.online || g.asleep) && new_ver.is_some_and(|v| g.fw_version < v)).map(|g| g.uid).collect();
             app.firmware.touched = true;
         }
         widgets::text(ui, "·", "small", TEXT_FAINT);

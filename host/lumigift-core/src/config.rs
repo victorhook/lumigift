@@ -127,6 +127,10 @@ pub struct LinkConfig {
     pub tick_guard: Duration,
     /// Run the full discovery sweep on connect.
     pub auto_discover: bool,
+    /// Send a `Wake` burst ([`Link::wake_all`](crate::Link::wake_all)'s,
+    /// ~1.3 s) on connecting to a bridge, before the discovery sweep: gifts
+    /// doze by themselves after a minute without a host.
+    pub wake_on_connect: bool,
     /// The background sweep covers all unknown addresses in about this time.
     pub background_sweep_period: Duration,
     /// Each gift's identity is re-checked (collision detection) this often.
@@ -154,6 +158,7 @@ impl Default for LinkConfig {
             max_unicast_in_flight: 2,
             tick_guard: Duration::from_micros(1500),
             auto_discover: true,
+            wake_on_connect: true,
             background_sweep_period: Duration::from_secs(8),
             reidentify_interval: Duration::from_secs(20),
             metadata: MetadataLocation::Default,

@@ -10,6 +10,8 @@ use lumigift_proto::{MusicFrame, Rgb, config_key};
 fn cfg() -> LinkConfig {
     LinkConfig {
         metadata: MetadataLocation::Disabled,
+        // Nothing dozes here; skip the 1.3 s Wake burst on connect.
+        wake_on_connect: false,
         ..Default::default()
     }
 }
@@ -319,6 +321,7 @@ fn commands_slots_config_metadata_channel() {
     let meta_path = dir.path().join("gifts.json");
     let lc = LinkConfig {
         metadata: MetadataLocation::Path(meta_path.clone()),
+        wake_on_connect: false,
         ..Default::default()
     };
     let (link, sim) = Link::simulated(lc, SimConfig::new(4));

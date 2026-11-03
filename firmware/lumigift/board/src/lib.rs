@@ -22,6 +22,7 @@ pub mod fastrx;
 pub mod flash;
 pub mod gpio;
 pub mod iwdg;
+pub mod power;
 pub mod radio;
 pub mod spi;
 pub mod sys;

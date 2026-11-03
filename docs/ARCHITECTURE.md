@@ -24,7 +24,7 @@
 | `host/nrf24-usb` | PC | Driver for the bridge (nusb, no libusb). |
 | `host/lumigift-core` | PC | Link scheduler, gift registry/telemetry, discovery, OTA engine, simulator. |
 | `host/lumigift-audio` | PC | Decoding, playback clock, offline analysis, show model, show engine. |
-| `host/lumigift-cli` | PC | Headless commands (status, blink, ota, rescue, play). |
+| `host/lumigift-cli` | PC | Headless commands (status, blink, ota, rescue, sleep, wake, play). |
 | `host/lumigift-studio` | PC | egui desktop app with live monitor + 3D show preview/editor. |
 
 ## Gift hardware (lumigift-rev-a)
@@ -76,6 +76,69 @@ See the module docs of `lumigift-proto` for the full message list. Summary:
 * **Liveness:** a gift whose polls fail for 1 s is marked offline. The gift
   itself turns its LEDs off after `idle_timeout` with no show frames. An IWDG
   watchdog resets a hung gift.
+
+## Power / doze
+
+Constants in `lumigift_proto::doze`. A dozing gift has its LEDs off and its
+receiver on for only `LISTEN_US` (2 ms) every `PERIOD_MS` (1 s, on its ±10 %
+LSI clock, so each gift has its own phase and period). Outside those windows
+it acks and hears nothing. In a window, `Broadcast::Wake` or a unicast to its
+own address wakes it. Other broadcasts (show frames, `Sync`) are ignored, and
+it keeps dozing. A gift dozes on `Broadcast::Sleep`, or by itself after
+`AUTO_AFTER_MS` (60 s) without any decodable host packet. A connected host
+never lets that happen, since it sends `Sync` beacons and polls at all times.
+
+Gift side (`firmware/lumigift/board/src/power.rs`, `app`):
+
+* **Awake:** the main loop ends in `WFI`. A 1 kHz TIM14 compare tick and the
+  radio IRQ wake it (the STM32C011 draws ~1 mA asleep vs ~3 mA running at
+  48 MHz). Every mA at 3.3 V costs ~4 mA from the 1.5 V cell (5 V boost, then
+  the 3.3 V LDO), so the nRF receiving all the time (13.5 mA) dominates.
+* **Doze:** LEDs black (the last WS2812 frame must be out before the clock
+  changes), ADC and its regulator off, then the system clock moves to the
+  32 kHz LSI with HSI48 off (~80 µA, like Stop mode, but GPIOs and timers keep
+  working, so no RTC or clock-restore dance). With interrupts masked, TIM16
+  one-shots end each `WFI`; a window is only GPIO: CE high for `LISTEN_US`,
+  CE low, look at the IRQ pin (the nRF sits in standby-I, 26 µA, in between).
+  The IWDG (~2 s) is fed every period. After a window that caught something
+  the gift returns to 48 MHz, handles the packets normally and, unless one was
+  `Wake` or a unicast, dozes on. The µs clock is advanced by the doze time
+  (`time::resume`).
+* **Measured** (1.5 V bench supply, LEDs off): 106 mA before (receiver always
+  on, CPU busy-looping), **12 mA dozing**, mostly the four WS2812Bs' quiescent
+  current and the boost converter.
+
+Host side (`lumigift-core`):
+
+* **`Link::sleep_all`** broadcasts `Sleep` (×5), then polls each online gift
+  once. Gifts that stop answering are marked asleep, and those that still
+  answer get another round (3 rounds at most). Gifts in their bootloader
+  don't doze.
+* **Asleep is a state of its own** (`GiftView::asleep`, `online == false`).
+  The host marks it, and the gift never reports it. Asleep gifts are not
+  polled, swept or re-identified, because they can't answer and a stray
+  unicast landing in a listen window would wake them. Any acked packet from
+  a gift clears it ("awake" in the log).
+* **`Link::wake_all`** sends `Wake` back to back for `WAKE_BURST_MS` (1.3 s,
+  more than one full period of the slowest clock), measured in time rather
+  than packets. The bridge sends ~8,000 one-byte packets/s. The burst jobs
+  are queued two deep and allowed through the scheduler's `tick_guard`
+  (`Radio::broadcast_gapless`), so no gap is long enough to swallow a 2 ms
+  window. Telemetry polls pause during the burst so online gifts don't look
+  offline. Afterwards every asleep/offline gift is polled (an answer marks it
+  online), the rest count as offline, and a discovery sweep finds gifts this
+  host never saw awake. `Snapshot::waking` is set meanwhile.
+* **Automatic wakes:** on connecting to a bridge, before the first sweep
+  (`LinkConfig::wake_on_connect`, default on), because gifts may have dozed
+  while no host ran. At the start of an OTA when any target is not online.
+  When the show output goes from Idle/Blackout to an active look while known
+  gifts are asleep. Only that transition counts, so a look that was already
+  running when "Sleep all" was pressed does not undo it.
+* CLI: `lumigift sleep`, `lumigift wake`, `--no-wake`. `status` shows
+  `asleep`. Studio: "Sleep all" / "Wake all" on the Fleet page and in Ctrl+K,
+  and an "Asleep" (moon) pill. The simulator models all of the above
+  (`SimConfig::doze_auto_after` shortens the 60 s for tests;
+  `host/lumigift-core/tests/doze.rs`).
 
 ## Firmware update (OTA)
 

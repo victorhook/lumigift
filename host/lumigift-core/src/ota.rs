@@ -363,6 +363,31 @@ impl Engine<'_> {
         self.check_cancel()
     }
 
+    /// Ask every target whether it took the `OtaBegin` and send it again to
+    /// those that did not (seen on a heavily loaded host: all three copies
+    /// missed). Otherwise a missed Begin only shows up after the whole stream,
+    /// costing a full second stream; this costs one query per target.
+    fn confirm_begin(&mut self) -> Result<(), LinkError> {
+        for attempt in 0..3 {
+            let q: Vec<(usize, u8)> = self.active().into_iter().map(|i| (i, 0)).collect();
+            let missed = self
+                .query(&q)
+                .into_iter()
+                .filter(|(_, r)| matches!(r, Ok(b) if b.session != self.session || b.state == OtaState::Idle))
+                .count();
+            if missed == 0 {
+                return Ok(());
+            }
+            self.ctx.log(
+                LogLevel::Warn,
+                None,
+                format!("OTA: {missed} target(s) missed OtaBegin, sending it again ({})", attempt + 1),
+            );
+            self.send_begin()?;
+        }
+        Ok(())
+    }
+
     /// Broadcast chunks in order at the current rate. The batches (~25 ms
     /// each) are queued at once and run back to back; waiting on them in
     /// order drives the progress display and cancellation.
@@ -440,6 +465,7 @@ impl Engine<'_> {
 
     fn run_phases(&mut self, force: bool) -> Result<(), LinkError> {
         let opts = self.ctx.shared.cfg.ota.clone();
+        self.wake_targets()?;
         self.validate_targets(force);
         self.require_active()?;
         if self.active().is_empty() {
@@ -451,6 +477,7 @@ impl Engine<'_> {
         // -- 3. Begin ----------------------------------------------------------
         self.set_phase(OtaPhase::Beginning);
         self.send_begin()?;
+        self.confirm_begin()?;
         for i in self.active() {
             self.targets[i].phase = OtaTargetPhase::Receiving;
             self.targets[i].heard = Instant::now();
@@ -479,6 +506,28 @@ impl Engine<'_> {
         self.set_phase(OtaPhase::Rebooting);
         self.confirm_boot(&opts)?;
         self.require_active()
+    }
+
+    /// Targets that are asleep or offline may be dozing (after a `Sleep`,
+    /// or by themselves while no host was around): wake them first, so they
+    /// answer and so up-to-date ones are recognised and skipped.
+    fn wake_targets(&mut self) -> Result<(), LinkError> {
+        let quiet = {
+            let st = self.ctx.shared.lock();
+            self.targets
+                .iter()
+                .filter(|t| st.gifts.get(&t.uid).is_some_and(|g| !g.online))
+                .count()
+        };
+        if quiet > 0 {
+            self.ctx.log(
+                LogLevel::Info,
+                None,
+                format!("OTA: waking {quiet} target(s) that are asleep or offline"),
+            );
+            ops::wake(self.ctx, false)?;
+        }
+        Ok(())
     }
 
     /// Skip targets already running the image; refuse other board revisions

@@ -21,6 +21,7 @@ use core::sync::atomic::{AtomicU32, Ordering};
 use cortex_m_rt::entry;
 use lumigift_board::config::ConfigStore;
 use lumigift_board::pac::{self, EXTI, interrupt};
+use lumigift_board::power;
 use lumigift_board::radio::{self, PIPE_UNICAST, Radio};
 use lumigift_board::{self as board, gpio, iwdg, sys, time};
 use lumigift_fx::{Renderer, gamma, hsv, power_limit, scale8};
@@ -34,7 +35,7 @@ use lumigift_proto::image::ImageHeader;
 use lumigift_proto::layout::{APP_REGION_BASE, BootShared};
 use lumigift_proto::{
     Broadcast, Identity, LEDS_PER_GIFT, MAX_PAYLOAD, MAX_SLOTS, OTA_BITMAP_BYTES, OtaBitmap, OtaState, Packet, Reply,
-    Rgb, Status, UNASSIGNED_SLOT, Unicast, config_key, status_flags, valid_node_addr,
+    Rgb, Status, UNASSIGNED_SLOT, Unicast, config_key, doze, status_flags, valid_node_addr,
 };
 
 use crate::adc::Adc;
@@ -129,6 +130,12 @@ struct App {
 
     /// Last command reply and how many more polls still return it.
     pending: Option<(Reply, u8)>,
+    /// Last valid packet from a host (any we could decode).
+    last_host_ms: u32,
+    /// `Broadcast::Sleep` received: doze at the next loop iteration.
+    sleep_requested: bool,
+    /// A packet that wakes a dozing gift arrived (`Wake`, or a unicast).
+    woken: bool,
     pending_channel: Option<(u32, u8)>,
     reboot_at: Option<(u32, bool)>,
     healthy: bool,
@@ -199,6 +206,9 @@ fn main() -> ! {
         low_batt: false,
         temp_c: 0,
         pending: None,
+        last_host_ms: 0,
+        sleep_requested: false,
+        woken: false,
         pending_channel: None,
         reboot_at: None,
         healthy: false,
@@ -273,6 +283,12 @@ impl App {
                 }
             }
 
+            let quiet = elapsed(now, self.last_host_ms, doze::AUTO_AFTER_MS);
+            if self.sleep_requested || (quiet && self.can_doze()) {
+                self.doze();
+                continue;
+            }
+
             if let Some((t, into_boot)) = self.reboot_at
                 && elapsed(now, t, REBOOT_DELAY_MS)
             {
@@ -287,7 +303,65 @@ impl App {
                 }
                 sys::reset();
             }
+
+            // Sleep until the next 1 kHz tick or radio IRQ (~1 mA instead of
+            // ~3 mA at 48 MHz). An edge that came during this iteration is
+            // still pending and ends the WFI at once.
+            cortex_m::asm::wfi();
         }
+    }
+
+    /// Nothing in progress that dozing would break.
+    fn can_doze(&self) -> bool {
+        self.radio.is_some()
+            && !self.leds_active
+            && self.blink.is_none()
+            && self.reboot_at.is_none()
+            && self.pending_channel.is_none()
+    }
+
+    /// Doze until a host wakes us (see `lumigift_proto::doze`). LEDs dark,
+    /// ADC off; every listen window that caught something is handled as
+    /// usual, and anything but `Wake` or a unicast sends us back to doze.
+    fn doze(&mut self) {
+        self.sleep_requested = false;
+        self.blink = None;
+        self.go_dark();
+        self.adc.off();
+        loop {
+            let Some(r) = self.radio.as_mut() else { break };
+            power::doze_until_rx(r, doze::PERIOD_MS * 1000, doze::LISTEN_US);
+            self.woken = false;
+            iwdg::feed();
+            let now = time::now_ms();
+            self.service_radio(now);
+            if self.woken || self.sleep_requested {
+                // A Sleep among the packets: stay asleep.
+                if !self.sleep_requested {
+                    break;
+                }
+                self.sleep_requested = false;
+            }
+            // Show frames / beacons are not for a dozing gift.
+            self.go_dark();
+        }
+        self.adc = Adc::new();
+        let now = time::now_ms();
+        self.last_host_ms = now;
+        self.t_render = now;
+        self.measure();
+        self.preload_status();
+    }
+
+    /// Show off, LEDs black (waits for the frame to go out).
+    fn go_dark(&mut self) {
+        self.mode = Mode::Off;
+        self.last_show_ms = None;
+        self.fade = 0;
+        self.leds.wait_idle();
+        self.leds.write(&[Rgb::BLACK; LEDS_PER_GIFT]);
+        self.leds.wait_idle();
+        self.leds_active = false;
     }
 
     // -- radio ----------------------------------------------------------------
@@ -311,19 +385,26 @@ impl App {
 
     fn handle(&mut self, r: &mut Radio, pipe: u8, data: &[u8], stamp: Option<u32>, now: u32) {
         let (mut reply, mut is_poll) = (None, false);
-        match Packet::decode(data) {
-            Ok(Packet::Broadcast(b)) => self.broadcast(r, b, data.len(), stamp, now),
+        let pkt = Packet::decode(data);
+        if pkt.is_ok() {
+            self.last_host_ms = now;
+        }
+        match pkt {
+            Ok(Packet::Broadcast(b)) => {
+                self.woken |= b == Broadcast::Wake;
+                self.broadcast(r, b, data.len(), stamp, now);
+            }
             Ok(Packet::Unicast(u)) => {
+                self.woken = true;
                 is_poll = matches!(u, Unicast::Poll { .. });
                 reply = self.unicast(u, now);
             }
             Err(_) => {}
         }
         if pipe == PIPE_UNICAST {
-            // The reply to a command may ride on that command's own ack (if we
-            // load it before the nRF sends the ack, ~130 µs) or on the next
-            // poll's. Keep it for the next REPLY_POLLS polls either way, like
-            // the bootloader, so a poll never replaces an undelivered reply.
+            // The reply rides on the next packet's ack (normally the host's
+            // poll). Keep it for the next REPLY_POLLS polls, like the
+            // bootloader, so a poll never replaces an undelivered reply.
             let reply = match reply {
                 Some(rep) => {
                     self.pending = Some((rep, REPLY_POLLS));
@@ -360,6 +441,10 @@ impl App {
                         radio::set_node_addr(r, node_addr);
                     }
                 }
+                return;
+            }
+            Broadcast::Sleep => {
+                self.sleep_requested = true;
                 return;
             }
             Broadcast::EnterBootloader { count, addrs } => {

@@ -21,6 +21,10 @@
 //!   [`Link::auto_assign_slots`], [`Link::reboot`], [`Link::set_config`],
 //!   [`Link::set_channel`], plus host-side metadata ([`Link::rename`],
 //!   [`Link::update_meta`]) persisted in `~/.config/lumigift/gifts.json`.
+//! * **Doze:** [`Link::sleep_all`] / [`Link::wake_all`]; asleep gifts show
+//!   as [`GiftView::asleep`] and are not polled. The link also wakes gifts by
+//!   itself on connect ([`LinkConfig::wake_on_connect`]), before a firmware
+//!   update, and when a look starts (show output leaves Idle/Blackout).
 //! * **Firmware updates:** [`Link::start_ota`] / [`Link::cancel_ota`], with
 //!   per-target progress in [`Snapshot::ota`].
 //! * **Clock sync:** [`Link::clock`] maps the bridge's µs clock to host

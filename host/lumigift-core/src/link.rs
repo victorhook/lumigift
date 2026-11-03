@@ -167,7 +167,30 @@ impl Link {
         if events != 0 {
             self.shared.show_events.fetch_or(events, Ordering::Relaxed);
         }
-        self.shared.show.store(Arc::new(out));
+        let starts = out.is_active();
+        let prev = self.shared.show.swap(Arc::new(out));
+        if starts && !prev.is_active() {
+            self.wake_for_show();
+        }
+    }
+
+    /// A look starts (the output went from Idle/Blackout to something to
+    /// show): wake the gifts this host put to sleep, in the background.
+    /// Only on that transition, so a show running while the gifts were sent
+    /// to sleep does not wake them again.
+    fn wake_for_show(&self) {
+        let needed = {
+            let st = self.shared.lock();
+            !st.waking && st.gifts.values().any(|g| g.asleep)
+        };
+        if needed && self.is_connected() && !self.ota_running() {
+            self.ctx.log(
+                LogLevel::Info,
+                None,
+                "a look starts: waking the dozing gifts",
+            );
+            let _ = self.spawn("wake", |c| ops::wake(c, false));
+        }
     }
 
     pub fn show(&self) -> Arc<ShowOutput> {
@@ -251,6 +274,32 @@ impl Link {
     /// Offline gifts are left behind (a warning is logged).
     pub fn set_channel(&self, channel: u8) -> Pending<CmdReport> {
         self.spawn("channel", move |c| ops::set_channel(c, channel))
+    }
+
+    /// Put every gift to sleep (`Broadcast::Sleep`, see
+    /// `lumigift_proto::doze`): LEDs off, radio listening only briefly once a
+    /// second. Online gifts that stop answering are shown as
+    /// [`GiftView::asleep`] and no longer polled; gifts that missed it get
+    /// it again. Resolves to the number of gifts now asleep. Fails during a
+    /// firmware update.
+    pub fn sleep_all(&self) -> Pending<usize> {
+        if self.ota_running() {
+            return Pending::ready(Err(LinkError::Busy("a firmware update is running".into())));
+        }
+        self.spawn("sleep", ops::sleep_all)
+    }
+
+    /// Wake dozing gifts: `Wake` broadcasts back to back for
+    /// `doze::WAKE_BURST_MS` (one full listen period of every gift), then
+    /// a poll of every asleep or offline gift and a discovery sweep for
+    /// gifts this host has not seen yet. Resolves to the number of gifts
+    /// online afterwards. If a wake is already running it waits for that
+    /// one. Fails during a firmware update (which wakes its own targets).
+    pub fn wake_all(&self) -> Pending<usize> {
+        if self.ota_running() {
+            return Pending::ready(Err(LinkError::Busy("a firmware update is running".into())));
+        }
+        self.spawn("wake", |c| ops::wake(c, true))
     }
 
     /// Change host-side metadata (name, colour tag, notes). Saved immediately.

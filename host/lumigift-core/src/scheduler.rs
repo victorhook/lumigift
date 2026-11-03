@@ -56,6 +56,9 @@ pub(crate) struct BcastReq {
     pub packets: Vec<Payload>,
     /// Packets per second (None = as fast as flow control allows).
     pub rate: Option<f32>,
+    /// May also go out in the `tick_guard` before a show tick (for a burst
+    /// of tiny packets that must not pause: the `Wake` burst).
+    pub gapless: bool,
     /// Resolves to the number of packets the bridge sent.
     pub reply: Sender<Result<u32, LinkError>>,
 }
@@ -159,10 +162,29 @@ impl Radio {
         packets: Vec<Payload>,
         rate: Option<f32>,
     ) -> Receiver<Result<u32, LinkError>> {
+        self.broadcast_job(packets, rate, false)
+    }
+
+    /// [`broadcast_async`](Self::broadcast_async) for a continuous burst of
+    /// tiny packets: it keeps going through the `tick_guard` before show
+    /// ticks (a 1-byte packet is ~80 µs of air, so the few in flight delay a
+    /// show packet by well under a millisecond), so the burst has no gap
+    /// long enough to swallow a dozing gift's 2 ms listen window.
+    pub fn broadcast_gapless(&self, packets: Vec<Payload>) -> Receiver<Result<u32, LinkError>> {
+        self.broadcast_job(packets, None, true)
+    }
+
+    fn broadcast_job(
+        &self,
+        packets: Vec<Payload>,
+        rate: Option<f32>,
+        gapless: bool,
+    ) -> Receiver<Result<u32, LinkError>> {
         let (tx, rx) = crossbeam_channel::bounded(1);
         self.submit(RadioReq::Broadcast(BcastReq {
             packets,
             rate,
+            gapless,
             reply: tx,
         }));
         rx
@@ -248,6 +270,7 @@ struct BcastJob {
     id: u64,
     packets: VecDeque<Payload>,
     rate: Option<f32>,
+    gapless: bool,
     start: Option<Instant>,
     sent: u32,
     in_flight: u32,
@@ -670,6 +693,7 @@ impl Scheduler {
                         id,
                         packets: b.packets.into(),
                         rate: b.rate,
+                        gapless: b.gapless,
                         start: None,
                         sent: 0,
                         in_flight: 0,
@@ -916,18 +940,19 @@ impl Scheduler {
         if !self.pending_show.is_empty() {
             return;
         }
-        if self.show_active()
-            && self.next_tick.saturating_duration_since(now) < self.shared.cfg.tick_guard
-        {
-            return;
-        }
+        let guarded = self.show_active()
+            && self.next_tick.saturating_duration_since(now) < self.shared.cfg.tick_guard;
         // 2. Broadcast jobs (OTA chunks etc.). With the show paused they may use the whole bridge queue.
         let bcap = if self.show_active() {
             cap
         } else {
             self.depth.max(cap)
         };
-        if let Some(job) = self.bjobs.iter_mut().find(|j| !j.packets.is_empty()) {
+        let job = self.bjobs.iter_mut().find(|j| !j.packets.is_empty());
+        if guarded && !job.as_ref().is_some_and(|j| j.gapless) {
+            return;
+        }
+        if let Some(job) = job {
             let start = *job.start.get_or_insert(now);
             let allowed = match job.rate {
                 None => u32::MAX,
@@ -947,6 +972,9 @@ impl Scheduler {
                 self.push_tx(TxCtx::Bcast { job: id }, 0, tx_flags::NO_ACK, 0, p, 0, 0);
             }
             self.finish_bcast_if_done();
+        }
+        if guarded {
+            return;
         }
         let mut ucap = self.shared.cfg.max_unicast_in_flight.max(1);
         if self.shared.ota_running.load(Ordering::Relaxed) && !self.show_active() {

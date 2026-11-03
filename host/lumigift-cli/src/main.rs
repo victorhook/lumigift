@@ -36,6 +36,10 @@ struct Cli {
     /// Radio channel the gifts are on (default 76).
     #[arg(long, global = true)]
     channel: Option<u8>,
+    /// Don't wake dozing gifts on connect (by default a ~1.3 s Wake burst
+    /// precedes the scan, since gifts doze after a minute without a host).
+    #[arg(long, global = true)]
+    no_wake: bool,
     /// More logging (-v info, -vv debug).
     #[arg(short, long, global = true, action = clap::ArgAction::Count)]
     verbose: u8,
@@ -120,6 +124,12 @@ enum Cmd {
         #[arg(long, default_value_t = 30)]
         seconds: u64,
     },
+    /// Put every gift to sleep (LEDs off, radio listening only briefly once
+    /// a second). Gifts also doze by themselves a minute after the last host
+    /// stops talking to them.
+    Sleep,
+    /// Wake dozing gifts (a ~1.3 s Wake burst, then a scan) and list them.
+    Wake,
     /// Show one colour on every slot until Ctrl-C (or --seconds).
     Solid {
         color: String,
@@ -241,6 +251,19 @@ fn run(cli: Cli) -> Res {
             force,
         } => ota(&link, &image, &targets, force, sim.is_some())?,
         Cmd::Rescue { seconds } => rescue(&link, sim.as_ref(), seconds)?,
+        Cmd::Sleep => {
+            let n = link.sleep_all().wait().map_err(e)?;
+            println!("{n} gift(s) asleep");
+            let awake = link.snapshot().online_count();
+            if awake > 0 {
+                println!("{awake} gift(s) still answer; try again");
+            }
+        }
+        Cmd::Wake => {
+            let n = link.wake_all().wait().map_err(e)?;
+            println!("{n} gift(s) online");
+            print_table(&link.snapshot(), sim.as_ref());
+        }
         Cmd::Solid { color, seconds } => {
             let c = parse_color(&color)?;
             link.set_show(ShowOutput::Solid(vec![c; proto::MAX_SLOTS as usize]));
@@ -351,6 +374,8 @@ fn open(cli: &Cli) -> Res<(Link, Option<SimHandle>)> {
     if let Some(r) = cli.ota_rate {
         cfg.ota.chunks_per_s = r.max(0.0);
     }
+    // `sleep` need not wake anything first, and `wake` sends its own burst.
+    cfg.wake_on_connect = !cli.no_wake && !matches!(cli.cmd, Cmd::Sleep | Cmd::Wake);
     let (link, sim) = match cli.sim {
         Some(n) => {
             cfg.metadata = MetadataLocation::Disabled;
@@ -472,7 +497,9 @@ fn print_table(s: &Snapshot, sim: Option<&SimHandle>) {
         if sim.is_some() { "  LEDS" } else { "" }
     );
     for g in &s.gifts {
-        let state = if !g.online {
+        let state = if g.asleep {
+            "asleep"
+        } else if !g.online {
             "offline"
         } else if g.address_conflict {
             "conflict"
@@ -578,13 +605,17 @@ fn print_header(s: &Snapshot) {
         BridgeState::Disconnected(w) => format!("DISCONNECTED: {w}"),
     };
     println!(
-        "{} [{}] ch {}  rtt {}µs  | {}/{} online | show {:.0} fps ({:.0} pkt/s, {} dropped) | polls {:.0}/s ({:.0} ok) | tx fail {} | bridge tx {} ack {} fail {} drop {}\x1b[K",
+        "{} [{}] ch {}  rtt {}µs  | {}/{} online{} | show {:.0} fps ({:.0} pkt/s, {} dropped) | polls {:.0}/s ({:.0} ok) | tx fail {} | bridge tx {} ack {} fail {} drop {}\x1b[K",
         b.description,
         state,
         b.radio.channel,
         b.ping_rtt_us.unwrap_or(0),
         s.online_count(),
         s.gifts.len(),
+        match s.asleep_count() {
+            0 => String::new(),
+            n => format!(", {n} asleep"),
+        },
         s.link.frames_per_s,
         s.link.show_packets_per_s,
         s.link.show_dropped,
@@ -596,6 +627,9 @@ fn print_header(s: &Snapshot) {
         b.stats.tx_failed,
         b.stats.events_dropped,
     );
+    if s.waking {
+        println!("waking dozing gifts…\x1b[K");
+    }
     if s.discovery.sweeping {
         println!("scanning {:.0}%\x1b[K", s.discovery.sweep_progress * 100.0);
     }
@@ -608,13 +642,17 @@ fn print_header(s: &Snapshot) {
 
 fn ota(link: &Link, path: &std::path::Path, targets: &[String], force: bool, sim: bool) -> Res {
     let image = std::fs::read(path).map_err(|x| format!("{}: {x}", path.display()))?;
-    let snap = link.snapshot();
+    let mut snap = link.snapshot();
+    // Default targets: every gift found online, or asleep (the update wakes
+    // them). One more sweep if the first found nothing (seen on a host so
+    // busy that the initial sweep missed the only gift).
+    let reachable = |s: &Snapshot| s.gifts.iter().filter(|g| g.online || g.asleep).map(|g| g.uid).collect::<Vec<Uid>>();
+    if targets.is_empty() && reachable(&snap).is_empty() && !sim {
+        let _ = link.rescan().wait();
+        snap = link.snapshot();
+    }
     let uids: Vec<Uid> = if targets.is_empty() {
-        snap.gifts
-            .iter()
-            .filter(|g| g.online)
-            .map(|g| g.uid)
-            .collect()
+        reachable(&snap)
     } else {
         let mut v = Vec::new();
         for t in targets {

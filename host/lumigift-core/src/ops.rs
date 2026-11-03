@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use crossbeam_channel::{Receiver, Sender};
 use lumigift_proto::{self as lp, Broadcast, Identity, Packet, Reply, Rgb, Unicast, config_key};
 
-use crate::scheduler::{Radio, UniMode, UniResult, encode};
+use crate::scheduler::{Radio, UniMode, UniResult, encode, wait_reply};
 use crate::state::Shared;
 use crate::types::*;
 
@@ -350,6 +350,179 @@ pub(crate) fn set_channel(ctx: &Ctx, channel: u8) -> Result<CmdReport, LinkError
 }
 
 // ---------------------------------------------------------------------------
+// Doze (see `lumigift_proto::doze` and ARCHITECTURE.md "Power / doze")
+// ---------------------------------------------------------------------------
+
+/// Sets an `AtomicBool` for as long as it lives, then restores its old value
+/// (so a wake inside an OTA leaves the OTA's own pause flags alone).
+struct FlagGuard<'a> {
+    flag: &'a std::sync::atomic::AtomicBool,
+    old: bool,
+}
+
+impl<'a> FlagGuard<'a> {
+    fn set(flag: &'a std::sync::atomic::AtomicBool) -> Self {
+        let old = flag.swap(true, Ordering::Relaxed);
+        Self { flag, old }
+    }
+}
+
+impl Drop for FlagGuard<'_> {
+    fn drop(&mut self) {
+        self.flag.store(self.old, Ordering::Relaxed);
+    }
+}
+
+/// Put every gift to sleep: broadcast `Sleep`, then check with one poll
+/// each that the online gifts stopped answering (those that still answer
+/// missed it and get another round). Resolves to the number of gifts now
+/// asleep. Gifts in their bootloader do not doze and are left alone.
+pub(crate) fn sleep_all(ctx: &Ctx) -> Result<usize, LinkError> {
+    ctx.check_connected()?;
+    // Keep telemetry polls off the dozing gifts while we check them.
+    let _quiet = FlagGuard::set(&ctx.shared.polling_paused);
+    let mut todo: Vec<(Uid, u8)> = {
+        let st = ctx.shared.lock();
+        st.gifts
+            .values()
+            .filter(|g| g.online && !g.in_bootloader)
+            .filter(|g| st.addr_owner.get(&g.node_addr) == Some(&g.uid))
+            .map(|g| (g.uid, g.node_addr))
+            .collect()
+    };
+    let sleep = encode(Packet::Broadcast(Broadcast::Sleep));
+    let mut asleep = 0usize;
+    for round in 0..3 {
+        // Unknown or unpollable gifts hear the first round too.
+        if todo.is_empty() && round > 0 {
+            break;
+        }
+        ctx.radio.broadcast(vec![sleep; 5], None)?;
+        // A gift dozes as soon as it handles the packet; give it a moment.
+        std::thread::sleep(Duration::from_millis(20));
+        // One exchange per gift (the bridge still retries in hardware). An
+        // ack means it is awake; it is then marked online again.
+        let res = ctx.fan_out(&todo, UniMode::PollOnly, 1, Unicast::Poll { seq: 0 });
+        let mut st = ctx.shared.lock();
+        let mut awake = Vec::new();
+        for ((uid, addr), (_, r)) in todo.iter().zip(res) {
+            if r.is_ok() {
+                awake.push((*uid, *addr));
+            } else {
+                st.mark_asleep(*uid);
+                asleep += 1;
+            }
+        }
+        todo = awake;
+    }
+    let mut st = ctx.shared.lock();
+    let mut msg = format!("sleep: {asleep} gift(s) dozing");
+    if !todo.is_empty() {
+        let names: Vec<String> = todo.iter().map(|(u, _)| st.label(u)).collect();
+        msg += &format!(", still awake: {}", names.join(", "));
+    }
+    st.log(LogLevel::Info, None, msg);
+    Ok(asleep)
+}
+
+/// Broadcast `Wake` back to back for `WAKE_BURST_MS`, so it falls into
+/// every dozing gift's listen window (one per `PERIOD_MS` of its ±10 %
+/// clock). Telemetry polls are paused meanwhile: the burst keeps the bridge
+/// busy, and a missing poll must not count against online gifts.
+fn wake_burst(ctx: &Ctx) -> Result<u32, LinkError> {
+    let _quiet = FlagGuard::set(&ctx.shared.polling_paused);
+    let wake = encode(Packet::Broadcast(Broadcast::Wake));
+    let burst = Duration::from_millis(lp::doze::WAKE_BURST_MS as u64);
+    let t0 = Instant::now();
+    let mut jobs: VecDeque<Receiver<Result<u32, LinkError>>> = VecDeque::new();
+    let mut sent = 0;
+    // Two jobs queued at all times so the scheduler never runs dry between
+    // them (a gap of a couple of ms could straddle a whole listen window).
+    while t0.elapsed() < burst && !ctx.shared.stopping() {
+        if jobs.len() < 2 {
+            jobs.push_back(ctx.radio.broadcast_gapless(vec![wake; 32]));
+        } else if let Some(rx) = jobs.pop_front() {
+            sent += wait_reply(&rx, Duration::from_secs(5), "wake burst")?;
+        }
+    }
+    for rx in jobs {
+        sent += wait_reply(&rx, Duration::from_secs(5), "wake burst")?;
+    }
+    Ok(sent)
+}
+
+/// Clears `State::waking` when the wake ends, however it ends.
+struct Waking<'a>(&'a Ctx);
+
+impl Drop for Waking<'_> {
+    fn drop(&mut self) {
+        self.0.shared.lock().waking = false;
+    }
+}
+
+/// Wake dozing gifts: a `Wake` burst, then a poll of every known gift that
+/// is asleep or offline (an answer marks it online). Gifts that still do not
+/// answer count as offline from then on (they get the normal offline polls).
+/// With `sweep`, a full discovery sweep follows, for gifts this host never
+/// saw awake. If a wake is already running, this waits for it instead.
+/// Resolves to the number of gifts online afterwards.
+pub(crate) fn wake(ctx: &Ctx, sweep: bool) -> Result<usize, LinkError> {
+    ctx.check_connected()?;
+    let online = |ctx: &Ctx| {
+        ctx.shared
+            .lock()
+            .gifts
+            .values()
+            .filter(|g| g.online)
+            .count()
+    };
+    let already = std::mem::replace(&mut ctx.shared.lock().waking, true);
+    if already {
+        while ctx.shared.lock().waking && !ctx.shared.stopping() {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        return Ok(online(ctx));
+    }
+    let _waking = Waking(ctx);
+    ctx.shared.publish();
+    let asleep = ctx
+        .shared
+        .lock()
+        .gifts
+        .values()
+        .filter(|g| g.asleep)
+        .count();
+    let sent = wake_burst(ctx)?;
+    let quiet: Vec<(Uid, u8)> = {
+        let st = ctx.shared.lock();
+        st.gifts
+            .values()
+            .filter(|g| !g.online && !st.conflicts.contains_key(&g.node_addr))
+            .map(|g| (g.uid, g.node_addr))
+            .collect()
+    };
+    // Every woken gift is listening now; a few tries each covers packet loss.
+    let _ = ctx.fan_out(&quiet, UniMode::PollOnly, 3, Unicast::Poll { seq: 0 });
+    {
+        let mut st = ctx.shared.lock();
+        for g in st.gifts.values_mut() {
+            // Not answering after a wake: treat as offline (polled again).
+            g.asleep = false;
+        }
+    }
+    if sweep {
+        full_sweep(ctx);
+    }
+    let n = online(ctx);
+    ctx.log(
+        LogLevel::Info,
+        None,
+        format!("wake: {sent} Wake packets, {asleep} gift(s) were asleep, {n} online"),
+    );
+    Ok(n)
+}
+
+// ---------------------------------------------------------------------------
 // Rescue
 // ---------------------------------------------------------------------------
 
@@ -493,7 +666,11 @@ fn full_sweep(ctx: &Ctx) -> usize {
     }
     let mut present = Vec::new();
     let mut window: VecDeque<(u8, Receiver<UniResult>)> = VecDeque::new();
-    let addrs: Vec<u8> = (1..=254u8).filter(|a| lp::valid_node_addr(*a)).collect();
+    // Asleep gifts cannot answer, and a poll in a listen window would wake them.
+    let asleep = ctx.shared.lock().asleep_addrs();
+    let addrs: Vec<u8> = (1..=254u8)
+        .filter(|a| lp::valid_node_addr(*a) && !asleep.contains(a))
+        .collect();
     let total = addrs.len();
     let mut done = 0usize;
     let mut drain_one = |w: &mut VecDeque<(u8, Receiver<UniResult>)>, present: &mut Vec<u8>| {
@@ -618,6 +795,13 @@ pub(crate) fn discovery_thread(ctx: Ctx, rescans: Receiver<Sender<Result<usize, 
             continue;
         }
         let rescan = rescans.try_recv().ok();
+        if !swept_this_connection && cfg.wake_on_connect {
+            // Gifts doze after a minute without a host (e.g. while no host
+            // ran): wake them before the first sweep so it finds them.
+            if let Err(e) = wake(&ctx, false) {
+                ctx.log(LogLevel::Warn, None, format!("wake on connect: {e}"));
+            }
+        }
         if rescan.is_some() || (!swept_this_connection && cfg.auto_discover) {
             let n = full_sweep(&ctx);
             swept_this_connection = true;
@@ -654,6 +838,8 @@ pub(crate) fn discovery_thread(ctx: Ctx, rescans: Receiver<Sender<Result<usize, 
             if let Some(a) = a {
                 st.needs_identify.remove(&a);
             }
+            // Leave dozing gifts alone (a unicast in a listen window wakes them).
+            let a = a.filter(|a| !st.asleep_addrs().contains(a));
             a.or_else(|| {
                 st.addr_owner
                     .iter()

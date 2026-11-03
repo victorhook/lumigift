@@ -27,7 +27,7 @@ pub struct Screenshotter {
     steps: Vec<&'static str>,
 }
 
-const STEPS: &[&str] = &["fleet", "fleet-list", "studio", "lighting", "lighting-groups", "stage", "stage-arrange", "firmware", "firmware-run", "settings", "palette", "fleet-compact", "perform"];
+const STEPS: &[&str] = &["fleet", "fleet-list", "studio", "lighting", "lighting-groups", "stage", "stage-arrange", "firmware", "firmware-run", "settings", "palette", "fleet-compact", "perform", "fleet-asleep"];
 
 impl Screenshotter {
     pub fn new(dir: PathBuf) -> Self {
@@ -69,7 +69,7 @@ impl Screenshotter {
                     "studio" => app.studio.has_track() && !app.studio.is_loading(),
                     _ => true,
                 };
-                let wait = match name { "studio" => 2.5, "firmware-run" => 3.0, "lighting" | "lighting-groups" => 2.0, _ => 1.2 };
+                let wait = match name { "studio" => 2.5, "firmware-run" | "fleet-asleep" => 3.0, "lighting" | "lighting-groups" => 2.0, _ => 1.2 };
                 if ready && self.since.elapsed() > Duration::from_secs_f32(wait) {
                     if name == "studio" && app.studio.sel.is_empty() {
                         // Select a cue so the inspector shows content.
@@ -165,6 +165,15 @@ fn setup(app: &mut App, ctx: &egui::Context, name: &str) {
         "perform" => {
             app.set_page(Page::Studio);
             app.set_performance(ctx, true);
+        }
+        "fleet-asleep" => {
+            // "Sleep all" with the first gift selected (inspector shows the state).
+            app.set_performance(ctx, false);
+            app.set_page(Page::Fleet);
+            app.sleep_all();
+            if let Some(g) = app.snap.gifts.first() {
+                app.select(g.uid);
+            }
         }
         "fleet-compact" => {
             app.palette.open();

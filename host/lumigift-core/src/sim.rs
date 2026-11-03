@@ -29,6 +29,13 @@
 //!   `BootHold` window on the default channel, IWDG, `BootShared`. App
 //!   faults (crash loop, hang, deaf radio) and power cuts at chosen OTA
 //!   phases can be injected.
+//! * **Doze** (`lumigift_proto::doze`): `Sleep` makes an app doze at once,
+//!   and so does [`SimConfig::doze_auto_after`] without any decodable host
+//!   packet. A dozing gift's LEDs are off and it hears the air only for
+//!   `LISTEN_US` every `PERIOD_MS` of its own clock (random phase, period
+//!   off by up to ±10 % per gift); nothing outside those windows is acked
+//!   or received. In a window, `Wake` or any unicast to it wakes it; other
+//!   broadcasts (show frames, `Sync`) are ignored and it keeps dozing.
 //! * **LEDs:** each gift renders Music frames with [`lumigift_fx::Renderer`]
 //!   (Solid/Leds/Blackout/Blink directly), honouring max brightness and the
 //!   power limit. [`SimHandle::gifts`] exposes the current colours.
@@ -125,6 +132,9 @@ pub struct SimConfig {
     /// its ack, so the reply rides on that same ack instead of the next
     /// poll's. Real gifts do this often (it depends on main-loop latency).
     pub fast_reply_pct: f32,
+    /// A gift dozes by itself after this long without a decodable packet
+    /// from a host (`doze::AUTO_AFTER_MS` on real gifts; shorten for tests).
+    pub doze_auto_after: Duration,
 }
 
 impl SimConfig {
@@ -163,6 +173,7 @@ impl SimConfig {
             chunk_write_time: Duration::from_micros(420),
             page_erase_time: Duration::from_millis(22),
             fast_reply_pct: 50.0,
+            doze_auto_after: Duration::from_millis(lp::doze::AUTO_AFTER_MS as u64),
         }
     }
 
@@ -228,6 +239,8 @@ pub struct SimGiftView {
     pub boot_attempts: u16,
     pub app_fault: SimAppFault,
     pub reset_reason: lp::ResetReason,
+    /// The app is dozing (LEDs off, receiver on only in listen windows).
+    pub dozing: bool,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -266,6 +279,7 @@ struct WorldParams {
     bridge0: u32,
     chunks_written: u64,
     fast_reply_pct: f32,
+    doze_auto_us: u64,
 }
 
 impl WorldParams {
@@ -663,6 +677,7 @@ impl SimTransport {
                 bridge0: u32::MAX - 3_000_000,
                 chunks_written: 0,
                 fast_reply_pct: cfg.fast_reply_pct,
+                doze_auto_us: cfg.doze_auto_after.as_micros() as u64,
             },
             gifts,
             capture_pct: cfg.capture_pct,
@@ -789,6 +804,7 @@ impl SimHandle {
                 boot_attempts: g.boot_attempts(),
                 app_fault: g.app_fault,
                 reset_reason: g.reset_reason(),
+                dozing: g.dozing(),
             })
             .collect()
     }

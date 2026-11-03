@@ -8,12 +8,14 @@ use nrf24_usb_proto::{Event, USB_PACKET_SIZE};
 
 /// Raw host packets waiting for the radio task. Every packet holds at least
 /// one message, so this many `Tx` always fit without the OUT endpoint NAKing;
-/// it is what we advertise as `Info::tx_queue_depth`.
-pub const CMD_QUEUE: usize = 24;
+/// it is what we advertise as `Info::tx_queue_depth`. 64 = ~32 ms of OTA
+/// chunks at 2,000/s: rides out host scheduling hiccups on a busy PC (with 24
+/// the stream slowed to half speed under heavy load).
+pub const CMD_QUEUE: usize = 64;
 
 /// Events waiting for the IN endpoint. Must be well above `CMD_QUEUE` so a
 /// full window of `TxDone`s never blocks the radio while the host is reading.
-pub const EVENT_QUEUE: usize = 48;
+pub const EVENT_QUEUE: usize = 96;
 
 /// Unsolicited `Rx` events may only use the queue up to this level; the rest
 /// is reserved for replies (`TxDone`, `CmdResult`, ...), which are never

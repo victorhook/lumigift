@@ -61,6 +61,20 @@ const IWDG_US: u64 = 2_000 * MS;
 const HEALTHY_US: u64 = 5_000 * MS;
 const APP_REBOOT_DELAY_US: u64 = 20 * MS;
 
+/// A dozing app's receiver schedule: on for `LISTEN_US` every `period`
+/// (its LSI-timed period), the first window starting at `start`.
+#[derive(Debug, Clone, Copy)]
+struct Doze {
+    start: u64,
+    period: u64,
+}
+
+impl Doze {
+    fn listening(&self, t: u64) -> bool {
+        t >= self.start && (t - self.start) % self.period < lp::doze::LISTEN_US as u64
+    }
+}
+
 /// Something wrong with the app image a gift runs (it is fixed by
 /// installing another image).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -210,6 +224,12 @@ pub(super) struct SimGift {
     off_until: Option<u64>,
     /// Next programmed double word at this offset gets a flipped bit.
     pub flash_glitch: Option<u32>,
+    /// The app dozes (see `lumigift_proto::doze`).
+    doze: Option<Doze>,
+    /// This gift's doze period: `PERIOD_MS` on its ±10 % LSI.
+    doze_period_us: u64,
+    /// Last decodable packet from a host (the app's auto-doze timer).
+    last_host: u64,
 }
 
 /// The app region seen by the bootloader logic, with time accounting.
@@ -353,7 +373,31 @@ impl SimGift {
             power_cut: None,
             off_until: None,
             flash_glitch: None,
+            doze: None,
+            doze_period_us: {
+                let lsi = 0.9 + 0.2 * fastrand::Rng::with_seed(seed as u64 ^ 0xD0_2E).f64();
+                (lp::doze::PERIOD_MS as f64 * MS as f64 * lsi) as u64
+            },
+            last_host: 0,
         }
+    }
+
+    pub fn dozing(&self) -> bool {
+        self.doze.is_some()
+    }
+
+    /// Doze from `t` on: LEDs off, receiver only in the listen windows.
+    fn enter_doze(&mut self, t: u64, w: &mut WorldParams) {
+        self.fifo.clear();
+        self.preloaded = None;
+        self.pending = None;
+        self.blink = None;
+        self.led_mode = LedMode::Off;
+        let period = self.doze_period_us;
+        self.doze = Some(Doze {
+            start: t + w.rng.u64(0..period),
+            period,
+        });
     }
 
     /// Start as if the gift had been running for a while: in the app (if
@@ -398,6 +442,7 @@ impl SimGift {
             || addr[1..] != lp::ADDR_PREFIX
             || self.radio_channel != channel
             || self.radio_on_at.is_none_or(|a| a > t)
+            || self.doze.is_some_and(|d| !d.listening(t))
         {
             return None;
         }
@@ -534,6 +579,8 @@ impl SimGift {
             let st = self.app_status(t);
             self.preload(Reply::Status(st));
         }
+        self.doze = None;
+        self.last_host = t;
         let healthy_at = (self.app_fault != SimAppFault::Hang).then_some(t + HEALTHY_US);
         self.mode = Mode::App {
             healthy_at: if settled { None } else { healthy_at },
@@ -579,6 +626,25 @@ impl SimGift {
         if pipe == Pipe::Unicast && self.last_pid == Some(pid) {
             // Retransmission after a lost ack: the nRF re-acks, no new packet.
             return Some(self.last_ack);
+        }
+        if self.doze.is_some() && matches!(self.mode, Mode::App { .. }) {
+            // Inside a listen window (`listens` checked). `Wake` or a
+            // unicast to it wakes it; anything else is dropped unhandled.
+            let wake = pipe == Pipe::Unicast
+                || matches!(
+                    Packet::decode(payload.as_slice()),
+                    Ok(Packet::Broadcast(Broadcast::Wake))
+                );
+            if !wake {
+                return Some(None);
+            }
+            self.doze = None;
+            self.last_host = t;
+            if pipe == Pipe::Broadcast {
+                return Some(None);
+            }
+            // The waking unicast is then handled like any other (its ack
+            // carries no payload: the TX FIFO was flushed on dozing).
         }
         let accepted = match &mut self.mode {
             Mode::Hold { .. } => {
@@ -850,6 +916,8 @@ impl SimGift {
     // -- app -----------------------------------------------------------------------
 
     fn step_app(&mut self, t: u64, w: &mut WorldParams) -> bool {
+        // Auto-doze: no host packet for `doze_auto_after`.
+        let doze_at = self.doze.is_none().then(|| self.last_host + w.doze_auto_us);
         let Mode::App {
             healthy_at,
             fault_at,
@@ -863,6 +931,7 @@ impl SimGift {
             Reset,
             Channel,
             Packet,
+            Doze,
         }
         // The earliest event due by `t` (ties: first listed).
         let fifo_done = self
@@ -875,6 +944,7 @@ impl SimGift {
             (self.pending_reset.map(|r| r.0), Due::Reset),
             (self.pending_channel.map(|c| c.0), Due::Channel),
             (fifo_done, Due::Packet),
+            (doze_at, Due::Doze),
         ]
         .into_iter()
         .filter_map(|(at, what)| at.filter(|&at| at <= t).map(|at| (at, what)))
@@ -910,6 +980,7 @@ impl SimGift {
                 self.busy_until = at;
                 self.app_handle(at, pipe, p, w);
             }
+            Due::Doze => self.enter_doze(at, w),
         }
         true
     }
@@ -918,6 +989,8 @@ impl SimGift {
         let Ok(pkt) = Packet::decode(p.as_slice()) else {
             return;
         };
+        // Any decodable packet is host traffic (restarts the auto-doze timer).
+        self.last_host = t;
         match (pipe, pkt) {
             (Pipe::Broadcast, Packet::Broadcast(b)) => self.app_broadcast(t, b, w),
             (Pipe::Unicast, Packet::Unicast(u)) => {
@@ -953,6 +1026,10 @@ impl SimGift {
                 if uid == self.uid && lp::valid_node_addr(node_addr) {
                     self.node_addr = node_addr;
                 }
+                return;
+            }
+            Broadcast::Sleep => {
+                self.enter_doze(t, w);
                 return;
             }
             Broadcast::EnterBootloader { count, addrs } => {
@@ -1174,7 +1251,7 @@ impl SimGift {
     pub fn leds(&mut self, t: u64, w: &WorldParams) -> [Rgb; LEDS_PER_GIFT] {
         let t = t.max(self.t_last);
         let black = [Rgb::BLACK; LEDS_PER_GIFT];
-        if !self.powered || !matches!(self.mode, Mode::App { .. }) {
+        if !self.powered || !matches!(self.mode, Mode::App { .. }) || self.doze.is_some() {
             return black;
         }
         if let Some((c, count, period, start)) = self.blink {

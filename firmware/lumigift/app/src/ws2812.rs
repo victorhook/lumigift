@@ -82,6 +82,14 @@ impl Ws2812 {
         Self
     }
 
+    /// Wait until the last frame is out and the line is low (before the
+    /// system clock changes, which would garble a frame in flight).
+    pub fn wait_idle(&mut self) {
+        let ch = DMA1.ch(CH);
+        while ch.cr().read().en() && !DMA1.isr().read().tcif(CH) {}
+        lumigift_board::time::delay_us(80); // last bit + reset (latch) time
+    }
+
     /// Start sending one frame (GRB, MSB first). Returns false if the
     /// previous frame is still being sent (~122 µs per frame).
     pub fn write(&mut self, leds: &[Rgb; LEDS_PER_GIFT]) -> bool {

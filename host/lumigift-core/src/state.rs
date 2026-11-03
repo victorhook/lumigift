@@ -65,6 +65,8 @@ pub(crate) struct Gift {
     pub fw_version: u32,
     pub in_bootloader: bool,
     pub online: bool,
+    /// Put to sleep by this host and not heard from since (never polled).
+    pub asleep: bool,
     pub first_seen: Instant,
     pub last_seen: Option<Instant>,
     pub last_identified: Instant,
@@ -94,6 +96,7 @@ impl Gift {
             fw_version: 0,
             in_bootloader: false,
             online: false,
+            asleep: false,
             first_seen: now,
             last_seen: None,
             last_identified: now,
@@ -171,6 +174,8 @@ pub(crate) struct State {
     pub discovery: DiscoveryView,
     pub bridge: BridgeView,
     pub link: LinkStats,
+    /// A wake (burst + polls) is running; see `ops::wake`.
+    pub waking: bool,
 }
 
 impl State {
@@ -194,6 +199,7 @@ impl State {
                 ..Default::default()
             },
             link: LinkStats::default(),
+            waking: false,
         };
         if let Some(w) = warn {
             s.log(LogLevel::Warn, None, w);
@@ -227,13 +233,34 @@ impl State {
         self.meta.get(uid).name.unwrap_or_else(|| uid.short())
     }
 
-    /// (addr, online) of every pollable address.
+    /// (addr, online) of every pollable address. Asleep gifts are left
+    /// out: they cannot answer, and a poll that happens to land in a listen
+    /// window would wake them.
     pub fn poll_targets(&self) -> Vec<(u8, bool)> {
         self.addr_owner
             .iter()
             .filter(|(a, _)| !self.conflicts.contains_key(a))
-            .filter_map(|(a, u)| self.gifts.get(u).map(|g| (*a, g.online)))
+            .filter_map(|(a, u)| self.gifts.get(u).map(|g| (*a, g)))
+            .filter(|(_, g)| !g.asleep)
+            .map(|(a, g)| (a, g.online))
             .collect()
+    }
+
+    /// Addresses owned by asleep gifts (discovery leaves them alone).
+    pub fn asleep_addrs(&self) -> BTreeSet<u8> {
+        self.gifts
+            .values()
+            .filter(|g| g.asleep)
+            .map(|g| g.node_addr)
+            .collect()
+    }
+
+    /// The gift dozes now (it took a `Sleep` broadcast and stopped answering).
+    pub fn mark_asleep(&mut self, uid: Uid) {
+        if let Some(g) = self.gifts.get_mut(&uid) {
+            g.asleep = true;
+            g.online = false;
+        }
     }
 
     fn mark_online(&mut self, uid: Uid, now: Instant) {
@@ -242,13 +269,16 @@ impl State {
             return;
         };
         g.last_seen = Some(now);
+        // Anything it answers means it is awake.
+        let woke = std::mem::take(&mut g.asleep);
         if !g.online {
             g.online = true;
             let addr = g.node_addr;
+            let what = if woke { "awake" } else { "online" };
             self.log(
                 LogLevel::Info,
                 Some(uid),
-                format!("{label} online (addr {addr})"),
+                format!("{label} {what} (addr {addr})"),
             );
         }
     }
@@ -578,6 +608,7 @@ impl State {
                     },
                     in_bootloader: g.in_bootloader,
                     online: g.online,
+                    asleep: g.asleep,
                     first_seen: g.first_seen,
                     last_seen: g.last_seen,
                     status: st,
@@ -611,6 +642,7 @@ impl State {
             ota: self.ota.clone(),
             events: self.log_arc.clone(),
             show_paused,
+            waking: self.waking,
         }
     }
 }

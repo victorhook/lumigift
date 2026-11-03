@@ -63,6 +63,16 @@ impl Adc {
         }
     }
 
+    /// Disable the ADC and its voltage regulator (doze); [`Adc::new`] brings
+    /// it back.
+    pub fn off(&mut self) {
+        if ADC1.cr().read().aden() {
+            ADC1.cr().modify(|w| w.set_addis(true));
+            while ADC1.cr().read().aden() {}
+        }
+        ADC1.cr().modify(|w| w.set_advregen(false));
+    }
+
     fn convert(&mut self, ch: u32) -> u16 {
         ADC1.isr().write(|w| w.set_ccrdy(true));
         ADC1.chselr().write_value(Chselr(1 << ch));
