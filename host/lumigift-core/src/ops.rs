@@ -667,7 +667,11 @@ fn full_sweep(ctx: &Ctx) -> usize {
     let mut present = Vec::new();
     let mut window: VecDeque<(u8, Receiver<UniResult>)> = VecDeque::new();
     // Asleep gifts cannot answer, and a poll in a listen window would wake them.
-    let asleep = ctx.shared.lock().asleep_addrs();
+    let (asleep, known) = {
+        let st = ctx.shared.lock();
+        let known: BTreeSet<u8> = st.meta.all().filter_map(|(_, m)| m.last_node_addr).collect();
+        (st.asleep_addrs(), known)
+    };
     let addrs: Vec<u8> = (1..=254u8)
         .filter(|a| lp::valid_node_addr(*a) && !asleep.contains(a))
         .collect();
@@ -688,10 +692,13 @@ fn full_sweep(ctx: &Ctx) -> usize {
         if ctx.shared.stopping() {
             break;
         }
+        // Where a gift lived last time, try harder: missing it means a fresh
+        // CLI run does not see (or update) it.
+        let attempts = if known.contains(&a) { 3 } else { 1 };
         window.push_back((
             a,
             ctx.radio
-                .unicast_async(a, Unicast::Poll { seq: 0 }, UniMode::PollOnly, 1),
+                .unicast_async(a, Unicast::Poll { seq: 0 }, UniMode::PollOnly, attempts),
         ));
         if window.len() >= 4 {
             drain_one(&mut window, &mut present);
@@ -767,7 +774,11 @@ fn resolve_conflict(ctx: &Ctx, addr: u8, uids: BTreeSet<Uid>) {
             );
         }
     }
-    identify_addr(ctx, addr, 4);
+    // Colliding acks: only the strongest of several gifts on one address gets
+    // through, so a third gift can hide behind the one we kept. With the
+    // others moved away it is only the two of them now; ask often enough to
+    // see it (otherwise it waits for the next background sweep, ~20 s).
+    identify_addr(ctx, addr, 10);
 }
 
 /// Long-running discovery / maintenance loop.

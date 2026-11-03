@@ -23,9 +23,12 @@ impl Uid {
     pub fn to_hex(&self) -> String {
         self.0.iter().map(|b| format!("{b:02x}")).collect()
     }
-    /// The last 3 bytes in hex, handy for compact tables.
+    /// The first 4 bytes in hex, handy for compact tables. On STM32 they are
+    /// the die's X/Y position on its wafer, which differs between chips of
+    /// one batch; the trailing bytes are the lot number, the same for all of
+    /// them (three gifts from one batch all showed `383120` before).
     pub fn short(&self) -> String {
-        self.0[9..].iter().map(|b| format!("{b:02x}")).collect()
+        self.0[..4].iter().map(|b| format!("{b:02x}")).collect()
     }
 }
 
