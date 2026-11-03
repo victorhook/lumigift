@@ -69,6 +69,17 @@ fn EXTI4_15() {
     }
 }
 
+/// Load the ack payload for the next unicast, but only once the nRF has sent
+/// the ack for the packet that just arrived (its RX_DR edge +
+/// [`radio::ACK_DONE_US`]). Flushing the TX FIFO while that ack was on air
+/// cut it short: measured on hardware, ~60 % of unicasts needed a
+/// retransmission and some acks arrived without payload.
+fn preload(r: &mut Radio, reply: &Reply) {
+    let edge = EDGE_US.load(Ordering::Relaxed);
+    while time::now_us().wrapping_sub(edge) < radio::ACK_DONE_US {}
+    radio::preload(r, reply);
+}
+
 /// PA4 falling edge -> EXTI line 4.
 fn enable_radio_irq() {
     EXTI.exticr(1).modify(|w| w.set_exti(0, 0)); // EXTICR2 covers lines 4..7; 0 = port A
@@ -150,7 +161,7 @@ fn main() -> ! {
     let mut radio = radio::start(cfg.current.channel, cfg.current.node_addr);
     if let Some(r) = radio.as_mut() {
         let st = Status { uptime_ms: time::now_ms(), fw_version, reset_reason, resets, ..Default::default() };
-        radio::preload(r, &Reply::Status(st));
+        preload(r, &Reply::Status(st));
     }
     let leds = Ws2812::new();
     let adc = Adc::new();
@@ -329,7 +340,7 @@ impl App {
                     }
                 },
             };
-            radio::preload(r, &reply);
+            preload(r, &reply);
             self.t_status = now;
         }
     }
@@ -508,7 +519,7 @@ impl App {
         self.pending = None;
         let st = Reply::Status(self.status());
         if let Some(r) = self.radio.as_mut() {
-            radio::preload(r, &st);
+            preload(r, &st);
         }
     }
 

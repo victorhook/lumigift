@@ -81,6 +81,12 @@ pub fn set_channel(r: &mut Radio, channel: u8) {
 }
 
 /// Replace the pending ack payload with exactly one `reply`.
+/// Time from a packet's arrival (RX_DR) until the nRF has finished sending
+/// its ack: 130 µs turnaround + up to ~313 µs ack air time (32-byte payload,
+/// 1 Mbps) + margin. Flushing the TX FIFO earlier cuts that ack short (the
+/// host then retransmits): wait this long after a unicast before [`preload`].
+pub const ACK_DONE_US: u32 = 500;
+
 pub fn preload(r: &mut Radio, reply: &Reply) {
     let mut buf = [0u8; MAX_PAYLOAD];
     let n = reply.encode(&mut buf);

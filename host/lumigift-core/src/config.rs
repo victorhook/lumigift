@@ -62,9 +62,9 @@ pub enum MetadataLocation {
 /// OTA engine parameters.
 #[derive(Debug, Clone)]
 pub struct OtaOptions {
-    /// Chunk broadcast pace for the first pass, chunks/s. `0` (default) =
-    /// automatic: the rate the gifts' flash can absorb, from the page erase
-    /// and double-word program times (≈1,900 chunks/s for a 15 KiB image).
+    /// Chunk broadcast pace, chunks/s. `0` (default) = automatic: the rate
+    /// the gifts can program once the image's pages are erased (from
+    /// `double_word_time`: ≈2,000 chunks/s on real gifts).
     pub chunks_per_s: f32,
     /// Max query/rebroadcast rounds after the first pass.
     pub max_rounds: u8,
@@ -79,7 +79,8 @@ pub struct OtaOptions {
     /// and app CRC). [`Link::start_ota_with`](crate::Link::start_ota_with)
     /// can force an update anyway.
     pub skip_up_to_date: bool,
-    /// Flash timings assumed for the automatic rate.
+    /// Flash timings: the pause after `OtaBegin` while the gifts erase, and
+    /// the automatic chunk rate.
     pub page_erase_time: Duration,
     pub double_word_time: Duration,
 }
@@ -94,7 +95,10 @@ impl Default for OtaOptions {
             adaptive: true,
             skip_up_to_date: true,
             page_erase_time: Duration::from_millis(22),
-            double_word_time: Duration::from_micros(85),
+            // Effective, including the bootloader's per-double-word work:
+            // measured ~2,200 chunks/s sustained on a real STM32C011 (the
+            // datasheet's 85 µs alone would allow ~3,500).
+            double_word_time: Duration::from_micros(140),
         }
     }
 }

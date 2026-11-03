@@ -119,6 +119,9 @@ fn main() -> ! {
                 Action::Unicast => {
                     if let Some(n) = rings.uni.pop_into(&mut buf) {
                         let reply = rec.on_unicast(&buf[..n], &rings.bc, now, &AppRegionRead, &cx);
+                        // Let the nRF finish this packet's ack before the
+                        // FIFO flush (unicasts are rare: polls and queries).
+                        time::delay_us(radio::ACK_DONE_US);
                         radio::preload(r, &reply);
                     }
                 }

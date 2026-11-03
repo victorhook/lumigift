@@ -6,10 +6,12 @@
 //! 2. **EnteringBootloader**: one `EnterBootloader` broadcast carrying every
 //!    target's node address (repeated a few times), then polling each target
 //!    until it reports `IN_BOOTLOADER`; unicast `Reboot` for stragglers.
-//! 3. **Beginning**: `OtaBegin` broadcast (no waiting: the bootloaders erase
-//!    in the background while buffering chunks).
-//! 4. **Streaming**: every chunk in order (best for the flash: pages are
-//!    erased in order) at the rate the gifts' flash can absorb.
+//! 3. **Beginning**: `OtaBegin` broadcast, then a pause while the
+//!    bootloaders erase every page of the image (they erase ahead whenever
+//!    idle). Streaming while they still erased left the flash ~90 % busy and
+//!    lost ~10 % of the first pass on hardware.
+//! 4. **Streaming**: every chunk in order at the rate the gifts can program
+//!    (double-word writes only), up to the bridge's air rate.
 //! 5. **Repairing**: `OtaQuery` bitmaps (only windows with holes); the union
 //!    of every target's missing chunks is re-broadcast until each target
 //!    reports `Verified` (the bootloader verifies on its own when the image
@@ -90,26 +92,18 @@ const MAX_RESTARTS: u32 = 2;
 /// A target may stay silent this long during repairs (e.g. power-cycled).
 const SILENCE_LIMIT: Duration = Duration::from_secs(3);
 
-/// Chunks/s the gifts' flash can absorb for this image: page erases plus
-/// double-word programs plus per-chunk CPU time (the bootloader's RX ring
-/// absorbs the bursts while a page erases).
-fn auto_rate(img: &Image, o: &OtaOptions) -> f32 {
-    let chunks = img.bytes.len().div_ceil(OTA_CHUNK);
-    let pages = img.bytes.len().div_ceil(layout::PAGE_SIZE as usize);
-    let dws = img
-        .bytes
-        .chunks(8)
-        .filter(|dw| dw.iter().any(|&b| b != 0xFF))
-        .count();
-    let busy = o.page_erase_time * pages as u32
-        + o.double_word_time * dws as u32
-        + CHUNK_CPU * chunks as u32;
-    (chunks as f32 / busy.as_secs_f32()) * 0.97
+/// How long the bootloaders typically need to erase every page of the
+/// image. No margin: a gift with slower flash (40 ms max per page) is still
+/// erasing when the first chunks arrive and erases the page it needs right
+/// away, buffering the stream meanwhile (measured: no extra loss).
+fn erase_time(img: &Image, o: &OtaOptions) -> Duration {
+    let pages = img.bytes.len().div_ceil(layout::PAGE_SIZE as usize) as u32;
+    o.page_erase_time * pages
 }
 
-/// Rate for repair rounds: every page is erased by then, so the gifts only
-/// program (3 double words per chunk); the air rate is the other limit.
-fn repair_rate(o: &OtaOptions) -> f32 {
+/// Chunks/s once every page is erased: the gifts only program (3 double
+/// words per chunk); the air rate is the other limit.
+fn program_rate(o: &OtaOptions) -> f32 {
     let per_chunk = (o.double_word_time * 3 + CHUNK_CPU).max(RADIO_CHUNK);
     0.9 / per_chunk.as_secs_f32()
 }
@@ -215,7 +209,7 @@ pub(crate) fn run(
     let (rate, fix_rate) = if opts.chunks_per_s > 0.0 {
         (opts.chunks_per_s, true)
     } else {
-        (auto_rate(&img, &opts), false)
+        (program_rate(&opts), false)
     };
     let mut e = Engine {
         ctx,
@@ -364,7 +358,9 @@ impl Engine<'_> {
             image_crc: crc32(&self.img.bytes),
         })));
         self.ctx.radio.broadcast(vec![p; 3], None)?;
-        Ok(())
+        // Let the bootloaders erase the whole image before the stream starts.
+        std::thread::sleep(erase_time(&self.img, &self.ctx.shared.cfg.ota));
+        self.check_cancel()
     }
 
     /// Broadcast chunks in order at the current rate. The batches (~25 ms
@@ -770,8 +766,6 @@ impl Engine<'_> {
                 return Ok(());
             }
             if self.round == 0 && !self.fix_rate {
-                // Every page is erased by now: the gifts only program.
-                self.rate = repair_rate(opts);
                 let worst = open
                     .iter()
                     .map(|&i| self.targets[i].missing)

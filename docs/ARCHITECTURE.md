@@ -144,11 +144,12 @@ errors, a deaf app rescued with `BootHold`, a wrong stored channel).
    its `Status` says `IN_BOOTLOADER` (≈ 6 ms after the reset), and falls back
    to unicast `Reboot { into_bootloader }` after 150 ms.
 2. `OtaBegin { session, image_len, image_crc }` (×3). The bootloader erases
-   only the `ceil(image_len / 2 KiB)` pages the image covers, in order,
-   in the background (ahead of time when idle, or on demand when a chunk
-   for an unerased page comes up), and buffers chunks meanwhile.
+   only the `ceil(image_len / 2 KiB)` pages the image covers, in order
+   (ahead of time when idle, or on demand when a chunk for an unerased page
+   comes up, buffering chunks meanwhile). The host pauses for the typical
+   erase time of those pages (22 ms each) so the stream meets erased flash.
 3. `OtaChunk { session, index, data[24] }` for every chunk, in order, paced
-   at the rate the gifts' flash absorbs (see below).
+   at the rate the gifts can program (see below).
 4. `OtaQuery { session, window }` → `OtaBitmap { state, window, missing_count,
    bits[24] }`: the received bits of the first 192-chunk window at or after
    `window` that has holes (chunks still in the RX ring count as received).
@@ -168,47 +169,47 @@ recovery counts RX-ring overflows.
 
 ### Speed
 
-The bottleneck is the gifts' flash, not the radio:
+The bottleneck is the gifts' flash and CPU, not the radio. Measured on a real
+STM32C011 gift (datasheet: 85 µs per double word, 22 ms per 2 KiB page erase):
 
 | | per chunk (24 B) | chunks/s |
 |---|---:|---:|
-| air, 1 Mbps NO_ACK run (28 B payload = 297 µs + run overhead) | ~320 µs | ~3,100 |
-| air, 2 Mbps | ~160 µs | ~6,300 |
-| gift flash: 3 double words × 85 µs + CPU, plus 22 ms per 2 KiB page (85 chunks) | ~540 µs | ~1,850 |
+| air, 1 Mbps NO_ACK run (28 B payload = 297 µs + run overhead) | ~360 µs | ~2,770 (bridge, measured) |
+| gift, programming only: 3 double words + SPI drain + bookkeeping | ~450 µs | ~2,200 (measured) |
+| gift, while also erasing (22 ms per 85 chunks) | ~710 µs | ~1,400 |
 
-So a 15.8 KB image needs at least ~0.36 s of flash time (8 page erases +
-1,974 double words) whatever the air rate. To not lose that time:
-
-* **Erase overlaps reception, programming overlaps reception.** The
-  bootloader's erase/program sequences and the radio drain run from RAM
-  (`.data.ramfunc.*`); while the flash is busy the CPU keeps moving packets
-  from the 3-deep nRF RX FIFO into RAM rings (4 unicast + 80 broadcast slots,
-  2.8 KiB), so a 22-40 ms page erase loses nothing, and unicast queries are
-  answered before buffered chunks.
-* The host streams the first pass at the flash rate (from the image's page
-  and non-0xFF double-word counts, ≈1,800 chunks/s); repair rounds run at
-  ~2,800 chunks/s (all pages are erased by then), or slower after a very
-  lossy first pass. Measured in the simulator, streaming faster (up to the
-  bridge's limit) gives the same total time, only more repairs.
+* **Erase first, then stream.** Streaming while the gifts still erased kept
+  their flash ~90 % busy and lost ~3 % of chunks around every page erase on
+  hardware, ~10 % at 1,700 chunks/s. So the host pauses for the erase
+  (10 pages: 220 ms, done by all gifts in parallel) and then streams at
+  90 % of the programming rate (`OtaOptions::double_word_time` = 140 µs
+  effective, ≈2,000 chunks/s). Measured: ~1.5 % first-pass loss, one short
+  repair round. A gift with slower flash (40 ms max) erases the page a chunk
+  needs on demand, buffering the stream meanwhile.
+* **Erase/program overlap reception.** The bootloader's erase/program
+  sequences and the radio drain run from RAM (`.data.ramfunc.*`); while the
+  flash is busy the CPU keeps moving packets from the 3-deep nRF RX FIFO into
+  RAM rings (4 unicast + 80 broadcast slots, 2.8 KiB), and unicast queries
+  are answered before buffered chunks.
 * **2 Mbps: not used.** It would only shorten the air time, which is not the
-  limit (flash-bound at ~1,850 chunks/s), while costing ~3 dB of sensitivity
-  and adding a rate switch to the never-brick path.
+  limit, while costing ~3 dB of sensitivity and adding a rate switch to the
+  never-brick path.
 * **Chunk size: kept at 24 bytes.** 28 data bytes per 32-byte packet would
-  save ~5 % air per byte (irrelevant when flash-bound) but would split
-  double words across chunks, which out-of-order repair chunks make
+  split double words across chunks, which out-of-order repair chunks make
   awkward to program exactly once.
 
-Simulated wall-clock time to update 10 gifts with the current 15.8 KB app
-image (`cargo test -p lumigift-core --test ota -- timing --nocapture`; the
-simulator runs in real time against the real host code, with the bridge's
-air timing, USB latency, the gifts' flash timings, RX FIFO/ring limits and
-random loss):
+On hardware, one gift and an 18.6 KB image: **0.70 s** (enter 25 ms, erase
+220 ms, stream 395 ms, repair ~50 ms, reboot 10 ms), 10 of 10 consecutive
+updates good. Simulated for 10 gifts with the 15.8 KB image and the measured
+flash timing (`cargo test -p lumigift-core --test ota -- timing --nocapture`;
+the simulator runs the real host code against modelled radio, bridge, USB,
+flash, RX FIFO/rings and random loss):
 
-| loss | before (8 KiB bootloader, erase-all, first-10-missing list, 1,500 chunks/s) | now |
-|---:|---:|---:|
-| 0 % | 1.6 s | 0.48 s |
-| 5 % | 2.1 s | 0.67 s |
-| 20 % | 2.7 s | 1.1 s |
+| loss | 10 gifts |
+|---:|---:|
+| 0 % | 0.57 s |
+| 5 % | 0.82 s |
+| 20 % | 1.4 s |
 
 ### Boot decision
 

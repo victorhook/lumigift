@@ -1,10 +1,10 @@
-//! Send raw packets: `raw_tx <addr hex, 5 bytes LSB first> <count> [ack] [channel]`.
+//! Send raw packets: `raw_tx <addr hex, 5 bytes LSB first> <count> [ack|noack] [channel] [min|low|high|max]`.
 //! Prints how each one ended (Sent / Acked / MaxRetries).
 
 use std::time::Duration;
 
 use nrf24_usb::{Bridge, Command, Event, Transport};
-use nrf24_usb_proto::{Payload, RadioConfig, tx_flags};
+use nrf24_usb_proto::{Payload, Power, RadioConfig, tx_flags};
 
 fn main() -> Result<(), nrf24_usb::Error> {
     let a: Vec<String> = std::env::args().collect();
@@ -15,7 +15,13 @@ fn main() -> Result<(), nrf24_usb::Error> {
     let channel: u8 = a.get(4).and_then(|s| s.parse().ok()).unwrap_or(76);
     let mut b = Bridge::open(None)?;
     b.get_info(Duration::from_secs(1))?;
-    let cfg = RadioConfig { channel, ..Default::default() };
+    let power = match a.get(5).map(String::as_str) {
+        Some("min") => Power::Min,
+        Some("low") => Power::Low,
+        Some("high") => Power::High,
+        _ => Power::Max,
+    };
+    let cfg = RadioConfig { channel, power, ..Default::default() };
     b.send(&[Command::Configure(cfg), Command::SetTxAddr { slot: 0, addr: addr.clone().try_into().unwrap() }])?;
     let payload = Payload::new(&[0xEE, 0, 1, 2, 3, 4, 5, 6]).unwrap();
     let mut tally = std::collections::BTreeMap::new();
@@ -30,6 +36,6 @@ fn main() -> Result<(), nrf24_usb::Error> {
         }
         std::thread::sleep(Duration::from_millis(20));
     }
-    println!("{hex} ch{channel} ack={ack}: {tally:?}");
+    println!("{hex} ch{channel} ack={ack} {power:?}: {tally:?}");
     Ok(())
 }

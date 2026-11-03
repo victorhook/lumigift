@@ -115,7 +115,9 @@ pub struct SimConfig {
     /// Chance (percent) that one of several colliding acks is still received.
     pub capture_pct: f32,
     pub boot_version: u16,
-    /// Flash programming time of one full 24-byte OTA chunk (3 × 85 µs).
+    /// Flash programming time of one full 24-byte OTA chunk (3 double
+    /// words; ~140 µs each on a real STM32C011 including the bootloader's
+    /// bookkeeping, measured).
     pub chunk_write_time: Duration,
     /// Flash page erase time (22 ms typical, 40 ms max per the datasheet).
     pub page_erase_time: Duration,
@@ -158,7 +160,7 @@ impl SimConfig {
             usb_latency: Duration::from_micros(500),
             capture_pct: 60.0,
             boot_version: lumigift_logic::recovery::BOOT_VERSION,
-            chunk_write_time: Duration::from_micros(255),
+            chunk_write_time: Duration::from_micros(420),
             page_erase_time: Duration::from_millis(22),
             fast_reply_pct: 50.0,
         }
