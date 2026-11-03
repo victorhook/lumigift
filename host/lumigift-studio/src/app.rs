@@ -1214,9 +1214,10 @@ pub fn modal_frame() -> egui::Frame {
         .shadow(theme::shadow_modal())
 }
 
+/// "Gift 3000B400": the same short UID as the CLI (the die's wafer position;
+/// the UID's tail is the lot number, shared by a whole batch of chips).
 pub fn default_name(uid: &Uid) -> String {
-    let h = uid.to_hex().to_uppercase();
-    format!("Gift {}", &h[h.len() - 4..])
+    format!("Gift {}", uid.short().to_uppercase())
 }
 
 pub fn breathe(ui: &Ui) -> f32 {
