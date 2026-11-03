@@ -1,0 +1,30 @@
+[package]
+name = "nrf24-usb-boot"
+description = "USB DFU bootloader for the nrf24-usb bridge (STM32F103C8)"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+# Its own workspace: the app's embassy-stm32 enables stm32-metapac's `rt`
+# feature, which must not leak into this interrupt-free build.
+[workspace]
+
+[dependencies]
+nrf24-usb-proto = { path = "../../../crates/nrf24-usb-proto" }
+cortex-m = { version = "0.7", features = ["critical-section-single-core"] }
+cortex-m-rt = "0.7"
+stm32-metapac = { version = "21", features = ["stm32f103c8"] }
+usb-device = { version = "0.3", features = ["control-buffer-256"] }
+stm32-usbd = "0.8"
+usbd-dfu = "0.4"
+
+[profile.release]
+opt-level = "z"
+lto = "fat"
+codegen-units = 1
+debug = 2
+panic = "abort"
+incremental = false
+
+[profile.dev]
+opt-level = "z"

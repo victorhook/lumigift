@@ -5,9 +5,12 @@
 //!   `target/lumigift-app.img` (ImageHeader padded to 256 B + app bin) and `.bin`.
 //! * `size`: flash/RAM usage of both images against the budgets, and a check
 //!   that the RAM functions (`.data.ramfunc.*`) never branch back into flash.
-//! * `flash [--dry-run] [--probe VID:PID[:SERIAL]]`: one-time SWD flash with
-//!   probe-rs: bootloader ELF, then the app image at 0x0800_2800, then reset.
-//! * `unprotect [--dry-run]`: remove the bootloader's write protection (WRP
+//! * `flash [--dry-run] [--probe VID:PID[:SERIAL]] [--serial ST-LINK_SN] [--erase]`:
+//!   one-time SWD flash: bootloader ELF, then the app image at 0x0800_2800,
+//!   then reset. Uses probe-rs, or STM32CubeProgrammer if probe-rs is not
+//!   installed. `--erase` mass-erases first (for boards with old firmware;
+//!   fails once the bootloader has write-protected itself, see `unprotect`).
+//! * `unprotect [--dry-run] [--serial ST-LINK_SN]`: remove the bootloader's write protection (WRP
 //!   area A) over SWD with STM32CubeProgrammer, so a new bootloader can be
 //!   flashed (it re-protects itself on first boot).
 //!
@@ -247,12 +250,16 @@ fn cube_programmer() -> PathBuf {
 fn unprotect(args: &[String]) -> Result<()> {
     // WRP1A_STRT > WRP1A_END disables WRP area A (RDP must be level 0).
     let cli = cube_programmer();
-    let cmd = ["-c", "port=SWD", "mode=UR", "-ob", "WRP1A_STRT=0xF", "WRP1A_END=0x0"];
+    let mut cmd = vec!["-c".to_string(), "port=SWD".into()];
+    if let Some(sn) = arg_value(args, "--serial") {
+        cmd.push(format!("sn={sn}"));
+    }
+    cmd.extend(["-ob", "WRP1A_STRT=0xF", "WRP1A_END=0x0"].map(String::from));
     println!("{} {}", cli.display(), cmd.join(" "));
     if args.iter().any(|a| a == "--dry-run") {
         return Ok(());
     }
-    run(Command::new(&cli).args(cmd))
+    run(Command::new(&cli).args(&cmd))
 }
 
 // -- flash ---------------------------------------------------------------------
@@ -279,19 +286,55 @@ fn flash(args: &[String]) -> Result<()> {
     .map(|c| c.split(' ').map(String::from).collect())
     .collect();
     let have_probe_rs = Command::new("probe-rs").arg("--version").output().is_ok();
+    let cube = cube_programmer();
+    let have_cube = Command::new(&cube).arg("--version").output().is_ok();
+    if !have_probe_rs && have_cube {
+        return flash_cube(&cube, &boot, &img, args, dry);
+    }
     if dry || !have_probe_rs {
         if !have_probe_rs {
-            eprintln!("probe-rs not found (install: https://probe.rs/docs/getting-started/installation/); run:");
+            eprintln!(
+                "neither probe-rs nor STM32CubeProgrammer found \
+                 (install: https://probe.rs/docs/getting-started/installation/); run:"
+            );
         }
         for c in &cmds {
             println!("probe-rs {}", c.join(" "));
         }
         return if dry { Ok(()) } else { Err("probe-rs missing".into()) };
     }
+    if args.iter().any(|a| a == "--erase") {
+        run(Command::new("probe-rs").args(["erase", "--chip", CHIP]))?;
+    }
     for c in &cmds {
         run(Command::new("probe-rs").args(c))?;
     }
     Ok(())
+}
+
+/// The same with STM32CubeProgrammer (`--serial` picks the ST-Link when
+/// several are connected; it wants an `.elf` extension on the bootloader).
+fn flash_cube(cli: &Path, boot: &Path, img: &Path, args: &[String], dry: bool) -> Result<()> {
+    let boot_elf = boot.with_extension("elf");
+    if !dry {
+        fs::copy(boot, &boot_elf).map_err(|e| format!("{}: {e}", boot_elf.display()))?;
+    }
+    let mut connect = String::from("port=SWD");
+    if let Some(sn) = arg_value(args, "--serial") {
+        connect += &format!(" sn={sn}");
+    }
+    let mut cmd: Vec<String> = vec!["-c".into()];
+    cmd.extend(connect.split(' ').map(String::from));
+    if args.iter().any(|a| a == "--erase") {
+        cmd.extend(["-e".into(), "all".into()]);
+    }
+    cmd.extend(["-d".into(), boot_elf.display().to_string(), "-v".into()]);
+    cmd.extend(["-d".into(), img.display().to_string(), format!("{APP_REGION_BASE:#010x}"), "-v".into(), "-rst".into()]);
+    println!("{} {}", cli.display(), cmd.join(" "));
+    if dry {
+        return Ok(());
+    }
+    run(Command::new(cli).args(&cmd))
 }
 
 // -- minimal ELF32 little-endian reader ------------------------------------------

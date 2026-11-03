@@ -13,9 +13,34 @@ use embassy_stm32::time::Hertz;
 use embassy_stm32::{Config, Peripherals, bind_interrupts, interrupt, peripherals, usb};
 
 bind_interrupts!(pub struct Irqs {
-    USB_LP_CAN1_RX0 => usb::InterruptHandler<peripherals::USB>;
+    USB_LP_CAN1_RX0 => UsbNeverSuspend, usb::InterruptHandler<peripherals::USB>;
     EXTI1 => exti::InterruptHandler<interrupt::typelevel::EXTI1>;
 });
+
+/// Runs before embassy's USB handler and keeps the device out of USB
+/// suspend. On the F103 a spurious WKUP follows SUSP within microseconds
+/// (line still idle). Embassy queues both and reports Resume before Suspend,
+/// so its stack ends up "suspended" while the hardware is awake; the host's
+/// real resume then raises no WKUP, control requests go unanswered, and the
+/// host resets the device after 5 s: every open after an autosuspend (e.g.
+/// TLP on laptops) took ~6 s. The bridge is always powered and its radio is
+/// on anyway, so it simply never suspends: SUSP / WKUP are cleared before
+/// embassy sees them.
+pub struct UsbNeverSuspend;
+
+impl interrupt::typelevel::Handler<interrupt::typelevel::USB_LP_CAN1_RX0> for UsbNeverSuspend {
+    unsafe fn on_interrupt() {
+        let istr = embassy_stm32::pac::USB.istr();
+        let v = istr.read();
+        if v.susp() || v.wkup() {
+            // rc_w0 flags: write 0 to clear, 1 to leave the others alone.
+            let mut keep = embassy_stm32::pac::usb::regs::Istr(!0);
+            keep.set_susp(false);
+            keep.set_wkup(false);
+            istr.write_value(keep);
+        }
+    }
+}
 
 /// SPI clock for the nRF24 (datasheet max 10 MHz). 72 MHz APB2 / 8 = 9 MHz.
 const SPI_HZ: u32 = 9_000_000;

@@ -73,16 +73,19 @@ decoder (the full `Packet::decode` is 1.6 KiB), size-optimised
 contain no `BL` to a flash address and no indirect call: they run while the
 flash is busy, when any flash access would stall the CPU.
 
-## First-time flash (SWD, ST-Link, probe-rs)
+## First-time flash (SWD, ST-Link)
 
-probe-rs is not part of this repo; install it from <https://probe.rs>. Then:
+`cargo xtask flash` uses probe-rs (<https://probe.rs>) if it is installed,
+otherwise STM32CubeProgrammer (`~/opt/STM32CubeProgrammer/bin` or on `PATH`):
 
 ```sh
-./flash.sh               # = cargo xtask flash
-./flash.sh --dry-run     # only print the commands
+./flash.sh                         # = cargo xtask flash
+./flash.sh --dry-run               # only print the commands
+cargo xtask flash --erase          # first flash of a gift with old firmware: mass erase first
+cargo xtask flash --serial <SN>    # pick the ST-Link when several are connected (st-info --probe)
 ```
 
-which runs
+The ST-Link's reset line is not needed. With probe-rs this runs
 
 ```sh
 probe-rs download --chip STM32C011F6Px target/thumbv6m-none-eabi/release/lumigift-boot
@@ -105,7 +108,7 @@ the flash driver, can erase or program the bootloader, and `Identity` /
 fails until the protection is removed (RDP must be level 0, the default):
 
 ```sh
-cargo xtask unprotect   # = STM32_Programmer_CLI -c port=SWD mode=UR -ob WRP1A_STRT=0xF WRP1A_END=0x0
+cargo xtask unprotect   # = STM32_Programmer_CLI -c port=SWD [sn=<SN>] -ob WRP1A_STRT=0xF WRP1A_END=0x0
 ./flash.sh              # the new bootloader protects itself again on its first boot
 ```
 

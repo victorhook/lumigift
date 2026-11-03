@@ -1,0 +1,8 @@
+# Numbered below 73 so the uaccess tag is applied by systemd's 73-seat-late.rules.
+# nrf24-usb bridge (pid.codes VID 0x1209): give logged-in users access to the
+# app (PID 0x0001) and to its USB bootloader in DFU mode (PID 0x0002).
+# Install:  sudo cp 70-nrf24-usb.rules /etc/udev/rules.d/
+#           sudo udevadm control --reload-rules && sudo udevadm trigger
+# Then unplug/replug the dongle.
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="0001", MODE="0660", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="0002", MODE="0660", TAG+="uaccess"

@@ -61,7 +61,13 @@ See the module docs of `lumigift-proto` for the full message list. Summary:
   (`bcast_lost`) and keep their clock locked to the bridge.
 * **Uplink:** only through ack payloads. After every unicast packet a gift flushes its
   TX FIFO and preloads one reply. The host sends a command, then a `Poll`, and
-  reads the reply from the Poll's ack, matching `echo` with `seq`. The host polls
+  reads the reply matching `echo` with `seq`. A gift often handles the packet
+  inside the nRF's ~130 µs ack turnaround (measured on hardware), so the reply
+  may already ride on the command's own ack; the host checks that ack first and
+  only polls if needed. Gifts keep a command reply for the next 2 polls
+  (`REPLY_POLLS`, app and bootloader alike), so a poll never overwrites a reply
+  that has not been delivered. The simulator models both timings
+  (`SimConfig::fast_reply_pct`, 50 % by default). The host polls
   gifts round-robin between show frames, so every gift reports `Status` (uptime,
   battery, link counters, reset reason, fw version) several times per second.
 * **Discovery:** the host sweeps node addresses 1..=254 with `Poll`. When two gifts

@@ -1192,9 +1192,15 @@ impl Scheduler {
                 let done = match (a.req.mode, is_poll) {
                     (UniMode::PollOnly, _) => acked.then_some(reply),
                     (UniMode::Collect { .. }, false) => {
-                        a.cmd_acked = acked;
-                        a.stage = Stage::SendPoll;
-                        return;
+                        // A gift that handles the command within the nRF's
+                        // ~130 µs ack turnaround answers in this very ack.
+                        if let Some(r) = reply.filter(|r| reply_echo(r) == a.cmd_seq) {
+                            Some(Some(r))
+                        } else {
+                            a.cmd_acked = acked;
+                            a.stage = Stage::SendPoll;
+                            return;
+                        }
                     }
                     (UniMode::Collect { accept_cmd_ack }, true) => {
                         match reply.filter(|r| reply_echo(r) == a.cmd_seq) {

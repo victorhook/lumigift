@@ -38,12 +38,8 @@ while let Some(ev) = bridge.recv(Duration::from_millis(10))? {
 
 ## Linux permissions (udev)
 
-Create `/etc/udev/rules.d/70-nrf24-usb.rules`:
-
-```
-# nrf24-usb bridge (pid.codes test VID/PID)
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="0001", MODE="0660", TAG+="uaccess"
-```
-
-then `sudo udevadm control --reload-rules && sudo udevadm trigger` and replug the
+Install [`firmware/nrf24-usb-bridge/70-nrf24-usb.rules`](../../firmware/nrf24-usb-bridge/70-nrf24-usb.rules)
+(the app, `1209:0001`, and its USB bootloader, `1209:0002`) as
+`/etc/udev/rules.d/70-nrf24-usb.rules`. The number must stay below 73: `uaccess`
+only takes effect when set before systemd's `73-seat-late.rules`. Then run `sudo udevadm control --reload-rules && sudo udevadm trigger` and replug the
 bridge.

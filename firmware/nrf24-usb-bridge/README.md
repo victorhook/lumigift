@@ -11,7 +11,8 @@ about any particular application (Lumigift uses it as its computer-side radio).
   VID:PID `1209:0001`, serial number = the MCU's 96-bit UID in hex.
 * MS OS 2.0 descriptors (WinUSB compatible ID and a DeviceInterfaceGUID
   `{9B5C2B1E-4D7A-4F0C-9C61-2A8E5F3D7B40}`), so Windows binds WinUSB without a driver.
-* Release build: about 40 KiB flash (of 64 KiB), 6.9 KiB static RAM (of 20 KiB). The
+* Release build: about 40 KiB flash (of the 48 KiB app region after the 16 KiB USB
+  bootloader), 6.9 KiB static RAM (of 20 KiB). The
   rest of the RAM is stack.
 
 ## Hardware
@@ -25,7 +26,7 @@ UART bridge, so native USB needs a small rewire:
 |---|---|---|
 | D− | PA11 | cut or lift the CH340 D− connection, or use a separate USB connector |
 | D+ | PA12 | same |
-| D+ pull-up | PA12 → 1.5 kΩ → 3V3 | required: it tells the host a full-speed device is attached |
+| D+ pull-up | PA12 → 1.5 kΩ → 3V3 | **required**: it tells the host a full-speed device is attached. The board has none, and without it the PC never sees the dongle (the F103 has no internal USB pull-up) |
 | VBUS 5 V / GND | 5V / GND | as on the board |
 
 The pull-up is fixed, so at boot the firmware drives PA12 low for 10 ms before it starts
@@ -65,39 +66,94 @@ of `Board::take`, plus the `EXTI1` binding, which must match the IRQ pin's numbe
 
 ```sh
 cd firmware/nrf24-usb-bridge
-cargo build --release            # target thumbv7m-none-eabi comes from .cargo/config.toml
+cargo build --release                  # the app (target from .cargo/config.toml)
+(cd boot && cargo build --release)     # the USB bootloader (its own workspace)
 ```
 
-The ELF file is at `target/thumbv7m-none-eabi/release/nrf24-usb-bridge`.
+## Flash layout and USB bootloader
 
-## Flashing (ST-Link on SWDIO/SWCLK/GND/3V3)
+| Range | Size | Content |
+|---|---|---|
+| `0x0800_0000` | 16 KiB | USB DFU bootloader ([`boot/`](boot/src/main.rs), about 11 KiB) |
+| `0x0800_4000` | 48 KiB | the app (about 40 KiB) |
 
-**probe-rs** (`cargo install probe-rs-tools`): `.cargo/config.toml` already sets it as the runner:
+The bootloader never writes its own pages, so a bad or interrupted USB update
+can only break the app, and the bootloader can always install a new one. The
+app's first page (its vector table) is only committed after everything else is
+written and verified, so an interrupted update leaves no valid app and the bridge
+simply waits in DFU mode. It stays in the bootloader (LED double-blinks) when:
+
+* the app was told to update (`DFU_DETACH` on its DFU runtime interface);
+* there is no valid app;
+* the reset button is pressed twice within about half a second.
+
+In DFU mode the bridge enumerates as `1209:0002` ("nrf24-usb bootloader", same
+serial number as the app) and speaks DFU 1.1 with ST's DfuSe extensions.
+
+## Flashing
+
+**Once, over SWD** (ST-Link on SWDIO/SWCLK/GND/3V3; NRST is not needed):
 
 ```sh
-cargo run --release
-# equivalent to: probe-rs run --chip STM32F103C8 target/thumbv7m-none-eabi/release/nrf24-usb-bridge
+./flash-swd.sh        # builds both, writes bootloader + app (probe-rs, else OpenOCD)
 ```
 
-**st-flash** (stlink-tools, installed at `/usr/bin/st-flash`) needs a raw binary:
+**Every later update, over USB** (no ST-Link):
 
 ```sh
-/opt/gcc-arm-none-eabi-10-2020-q4-major/bin/arm-none-eabi-objcopy -O binary \
-    target/thumbv7m-none-eabi/release/nrf24-usb-bridge target/nrf24-usb-bridge.bin
-# or, with cargo-binutils + llvm-tools installed:
-#   cargo objcopy --release -- -O binary target/nrf24-usb-bridge.bin
-
-st-flash --reset write target/nrf24-usb-bridge.bin 0x08000000
+cargo build --release
+cargo run --release -p lumigift-cli -- bridge-update \
+    firmware/nrf24-usb-bridge/target/thumbv7m-none-eabi/release/nrf24-usb-bridge
 ```
 
-Some clones ship a CKS32F103 or report 128 KiB of flash. Both work. If `st-flash` refuses
-to connect, hold RESET, start the command, then let go (or add `--connect-under-reset`).
+This switches the running app into the bootloader, erases, writes, reads back,
+and restarts into the new app (also works if the bridge already waits in DFU
+mode). `dfu-util` works too, with a raw binary:
+
+```sh
+arm-none-eabi-objcopy -O binary target/thumbv7m-none-eabi/release/nrf24-usb-bridge app.bin
+dfu-util -d 1209:0001,1209:0002 -a 0 -s 0x08004000:leave -D app.bin
+```
+
+Windows: the app's interfaces get WinUSB automatically, but the bootloader has no
+MS OS descriptors, so DFU mode needs WinUSB bound once with Zadig.
+
+The app's linker script starts at `0x0800_4000`, so the app can no longer run
+without the bootloader. To go back to a bare app, flash both again with
+`flash-swd.sh`.
+
+## USB suspend
+
+The bridge never enters USB suspend. On the F103 a spurious WKUP follows SUSP
+within microseconds, which left embassy's USB stack "suspended" while the hardware
+was awake; after a host autosuspend (TLP and similar on laptops) every open then
+stalled for ~6 s until the host reset the device. A small handler that runs before
+embassy's ([`UsbNeverSuspend`](src/board.rs)) clears SUSP/WKUP, so the device simply
+stays awake (it is powered and its radio is on anyway). Opening an idle bridge
+takes milliseconds.
+
+## Diagnostics
+
+Examples in `host/nrf24-usb` and `host/lumigift-core` that talk to the hardware
+directly, below the link manager:
+
+```sh
+cargo run -p nrf24-usb --example bridge_info               # info, ping, stats
+cargo run -p nrf24-usb --example radio_selftest            # wiring check, no other node needed
+cargo run -p nrf24-usb --example raw_tx -- 604C474654 10 ack   # raw packets to an address
+cargo run -p lumigift-core --example raw_exchange -- 60    # command/poll exchange with gift 0x60
+```
+
+`radio_selftest` checks every nRF pin: register access (CSN/SCK/MOSI/MISO), a
+NO_ACK burst whose rate proves IRQ works (without it the bridge falls back to
+polling and manages only ~600 packets/s instead of ~2,800), auto-retransmit to an
+empty address (CE, MAX_RT), and a channel scan (the receiver).
 
 ## Host access
 
 * **Linux**: install the udev rule from this directory:
   ```sh
-  sudo cp 99-nrf24-usb.rules /etc/udev/rules.d/
+  sudo cp 70-nrf24-usb.rules /etc/udev/rules.d/
   sudo udevadm control --reload-rules && sudo udevadm trigger
   ```
   Then replug the dongle. The rule tags the device `uaccess` (logged-in users) and sets

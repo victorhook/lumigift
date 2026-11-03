@@ -6,6 +6,7 @@
 //! * `radio::radio_task`- decodes and executes commands strictly in order.
 //! * `usb::in_task`     - `EVENTS` -> bulk IN, many events per packet.
 //! * `led_task`         - heartbeat + traffic flicker.
+//! * `usb::detach_task` - `DFU_DETACH` -> reset into the USB bootloader.
 //!
 //! See README.md for wiring, protocol notes and the performance design.
 #![no_std]
@@ -56,6 +57,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(usb::device_task(u.device).unwrap());
     spawner.spawn(usb::out_task(u.ep_out).unwrap());
     spawner.spawn(usb::in_task(u.ep_in).unwrap());
+    spawner.spawn(usb::detach_task().unwrap());
 
     let bridge = Bridge::new(SpiDev { bus: b.spi, csn: b.csn }, b.ce, b.irq, uid);
     spawner.spawn(radio::radio_task(bridge).unwrap());

@@ -27,6 +27,7 @@ use lumigift_fx::{Renderer, gamma, hsv, power_limit, scale8};
 use lumigift_logic::adc::low_battery;
 use lumigift_logic::blink::Blink;
 use lumigift_logic::config_log::apply_key;
+use lumigift_logic::recovery::REPLY_POLLS;
 use lumigift_logic::seq::SeqTracker;
 use lumigift_logic::sync::{ClockSync, air_time_us};
 use lumigift_proto::image::ImageHeader;
@@ -116,6 +117,8 @@ struct App {
     temp_c: i8,
 
     reply_is_status: bool,
+    /// Last command reply and how many more polls still return it.
+    pending: Option<(Reply, u8)>,
     pending_channel: Option<(u32, u8)>,
     reboot_at: Option<(u32, bool)>,
     healthy: bool,
@@ -186,6 +189,7 @@ fn main() -> ! {
         low_batt: false,
         temp_c: 0,
         reply_is_status: false,
+        pending: None,
         pending_channel: None,
         reboot_at: None,
         healthy: false,
@@ -297,15 +301,37 @@ impl App {
     }
 
     fn handle(&mut self, r: &mut Radio, pipe: u8, data: &[u8], stamp: Option<u32>, now: u32) {
-        let mut reply = None;
+        let (mut reply, mut is_poll) = (None, false);
         match Packet::decode(data) {
             Ok(Packet::Broadcast(b)) => self.broadcast(r, b, data.len(), stamp, now),
-            Ok(Packet::Unicast(u)) => reply = self.unicast(u, now),
+            Ok(Packet::Unicast(u)) => {
+                is_poll = matches!(u, Unicast::Poll { .. });
+                reply = self.unicast(u, now);
+            }
             Err(_) => {}
         }
         if pipe == PIPE_UNICAST {
-            self.reply_is_status = reply.is_none();
-            let reply = reply.unwrap_or_else(|| Reply::Status(self.status()));
+            // The reply to a command may ride on that command's own ack (if we
+            // load it before the nRF sends the ack, ~130 µs) or on the next
+            // poll's. Keep it for the next REPLY_POLLS polls either way, like
+            // the bootloader, so a poll never replaces an undelivered reply.
+            let reply = match reply {
+                Some(rep) => {
+                    self.pending = Some((rep, REPLY_POLLS));
+                    rep
+                }
+                None => match self.pending.as_mut() {
+                    Some((rep, left)) if is_poll && *left > 0 => {
+                        *left -= 1;
+                        *rep
+                    }
+                    _ => {
+                        self.pending = None;
+                        Reply::Status(self.status())
+                    }
+                },
+            };
+            self.reply_is_status = self.pending.is_none();
             radio::preload(r, &reply);
             self.t_status = now;
         }

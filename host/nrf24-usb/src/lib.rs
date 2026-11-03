@@ -17,6 +17,7 @@
 //! * The [`Transport`] trait abstracts all of the above so a simulator can stand
 //!   in for the hardware, and [`TxFlow`] helps keep the number of in-flight
 //!   [`Command::Tx`] within [`Info::tx_queue_depth`].
+//! * [`dfu::update`] replaces the bridge's own firmware over USB.
 //!
 //! ```no_run
 //! use nrf24_usb::{Bridge, Transport};
@@ -47,6 +48,8 @@ use nusb::transfer::{Bulk, In, Out, TransferError};
 
 pub use nrf24_usb_proto::{Command, Event, Info, Stats};
 
+pub mod dfu;
+
 /// Bulk IN transfers kept queued by the reader thread.
 const IN_TRANSFERS: usize = 8;
 /// OUT transfers allowed to be pending before `send` waits for one to finish.
@@ -63,6 +66,8 @@ pub enum Error {
     Usb(String),
     #[error("protocol error: {0}")]
     Protocol(String),
+    #[error("firmware update failed: {0}")]
+    Dfu(String),
     #[error("timed out waiting for the bridge")]
     Timeout,
     #[error(

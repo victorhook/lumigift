@@ -119,6 +119,10 @@ pub struct SimConfig {
     pub chunk_write_time: Duration,
     /// Flash page erase time (22 ms typical, 40 ms max per the datasheet).
     pub page_erase_time: Duration,
+    /// Chance (percent) that an app handles a unicast before the nRF sends
+    /// its ack, so the reply rides on that same ack instead of the next
+    /// poll's. Real gifts do this often (it depends on main-loop latency).
+    pub fast_reply_pct: f32,
 }
 
 impl SimConfig {
@@ -156,6 +160,7 @@ impl SimConfig {
             boot_version: lumigift_logic::recovery::BOOT_VERSION,
             chunk_write_time: Duration::from_micros(255),
             page_erase_time: Duration::from_millis(22),
+            fast_reply_pct: 50.0,
         }
     }
 
@@ -258,6 +263,7 @@ struct WorldParams {
     dw_us: u64,
     bridge0: u32,
     chunks_written: u64,
+    fast_reply_pct: f32,
 }
 
 impl WorldParams {
@@ -654,6 +660,7 @@ impl SimTransport {
                 // Wraps ~3 s after start.
                 bridge0: u32::MAX - 3_000_000,
                 chunks_written: 0,
+                fast_reply_pct: cfg.fast_reply_pct,
             },
             gifts,
             capture_pct: cfg.capture_pct,

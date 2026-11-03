@@ -47,6 +47,9 @@ struct Cli {
 enum Cmd {
     /// List connected bridges.
     Devices,
+    /// Update the USB bridge's own firmware over USB (no ST-Link needed).
+    /// Takes the bridge app's ELF or a raw .bin for 0x08004000.
+    BridgeUpdate { firmware: std::path::PathBuf },
     /// Discover gifts and list them.
     Scan,
     /// Live status table (Ctrl-C to quit).
@@ -145,12 +148,14 @@ fn main() -> ExitCode {
 }
 
 fn run(cli: Cli) -> Res {
-    if let Cmd::Devices = cli.cmd {
-        return devices(cli.sim.is_some());
+    match &cli.cmd {
+        Cmd::Devices => return devices(cli.sim.is_some()),
+        Cmd::BridgeUpdate { firmware } => return bridge_update(firmware, cli.serial.as_deref()),
+        _ => {}
     }
     let (link, sim) = open(&cli)?;
     match cli.cmd {
-        Cmd::Devices => unreachable!(),
+        Cmd::Devices | Cmd::BridgeUpdate { .. } => unreachable!(),
         Cmd::Scan => {
             let n = link.rescan().wait().map_err(e)?;
             println!("{n} gift(s) online");
@@ -284,7 +289,11 @@ fn devices(sim: bool) -> Res {
     }
     let list = nrf24_usb::list().map_err(e)?;
     if list.is_empty() {
-        println!("no bridge found (VID 1209, PID 0001)");
+        if nrf24_usb::dfu::in_bootloader(None).unwrap_or(false) {
+            println!("a bridge is waiting in its USB bootloader (1209:0002): run `lumigift bridge-update`");
+        } else {
+            println!("no bridge found (VID 1209, PID 0001)");
+        }
     }
     for d in list {
         println!(
@@ -295,6 +304,42 @@ fn devices(sim: bool) -> Res {
             d.product.as_deref().unwrap_or("")
         );
     }
+    Ok(())
+}
+
+fn bridge_update(path: &std::path::Path, serial: Option<&str>) -> Res {
+    use nrf24_usb::dfu::{self, Phase};
+    let bytes = std::fs::read(path).map_err(|err| format!("{}: {err}", path.display()))?;
+    let fw = dfu::Firmware::parse(&bytes).map_err(e)?;
+    let mut last = None;
+    let report = dfu::update(&fw, serial, &mut |phase, done, total| {
+        let name = match phase {
+            Phase::Detach => "switching to bootloader",
+            Phase::Erase => "erasing",
+            Phase::Write => "writing",
+            Phase::Verify => "verifying",
+            Phase::Restart => "restarting",
+        };
+        let pct = (done * 100).checked_div(total).unwrap_or(100);
+        if last != Some((phase, pct / 5)) {
+            last = Some((phase, pct / 5));
+            print!("\r  {name:<24} {pct:3}%\x1b[K");
+            let _ = std::io::stdout().flush();
+        }
+    })
+    .map_err(e)?;
+    println!();
+    println!(
+        "updated bridge {} ({} bytes at 0x{:08X}) in {:.1} s{}",
+        report.serial.as_deref().unwrap_or("?"),
+        report.bytes,
+        report.base,
+        report.elapsed.as_secs_f32(),
+        match report.fw_version {
+            Some(v) => format!(", running fw {}.{}", v >> 8, v & 0xFF),
+            None => String::from(" (did not see the app come back yet)"),
+        }
+    );
     Ok(())
 }
 

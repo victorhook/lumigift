@@ -40,6 +40,43 @@ pub const EP_OUT: u8 = 0x01;
 pub const EP_IN: u8 = 0x81;
 pub const USB_PACKET_SIZE: usize = 64;
 
+/// Firmware update over USB (DFU 1.1 with ST's DfuSe extensions, as spoken by
+/// `dfu-util -s <addr>:leave`).
+///
+/// The bridge app exposes a second interface, a DFU *runtime* interface
+/// (class [`dfu::CLASS`], protocol [`dfu::PROTOCOL_RUNTIME`]). `DFU_DETACH`
+/// on it makes the app write [`dfu::BKP_REQUEST`] to backup register DR1 and
+/// reset. The USB bootloader then stays in DFU mode, enumerating as
+/// `USB_VID:`[`dfu::USB_PID`] with the same serial number as the app.
+pub mod dfu {
+    /// PID of the bootloader in DFU mode.
+    pub const USB_PID: u16 = 0x0002;
+    pub const USB_PRODUCT: &str = "nrf24-usb bootloader";
+    /// Application-specific interface class, DFU subclass.
+    pub const CLASS: u8 = 0xFE;
+    pub const SUBCLASS: u8 = 0x01;
+    pub const PROTOCOL_RUNTIME: u8 = 0x01;
+    pub const PROTOCOL_DFU_MODE: u8 = 0x02;
+    /// DFU functional descriptor type.
+    pub const FUNCTIONAL_DESCRIPTOR: u8 = 0x21;
+
+    // Class requests (bmRequestType 0x21 out / 0xA1 in, wIndex = interface).
+    pub const DETACH: u8 = 0;
+    pub const DNLOAD: u8 = 1;
+    pub const UPLOAD: u8 = 2;
+    pub const GETSTATUS: u8 = 3;
+    pub const CLRSTATUS: u8 = 4;
+    pub const GETSTATE: u8 = 5;
+    pub const ABORT: u8 = 6;
+
+    // DfuSe commands: DNLOAD block 0 carrying `[cmd, addr (LE u32)]`.
+    pub const DFUSE_SET_ADDRESS: u8 = 0x21;
+    pub const DFUSE_ERASE_PAGE: u8 = 0x41;
+
+    /// Value the app writes to BKP DR1 to ask the bootloader to stay in DFU.
+    pub const BKP_REQUEST: u16 = 0xB007;
+}
+
 /// Bumped on any incompatible change to this module.
 pub const PROTOCOL_VERSION: u8 = 1;
 

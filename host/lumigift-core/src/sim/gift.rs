@@ -187,6 +187,8 @@ pub(super) struct SimGift {
     pub boot_time: u64,
     pub t_last: u64,
     preloaded: Option<Payload>,
+    /// App: last command reply and how many more polls still return it.
+    pending: Option<(Reply, u8)>,
     last_ack: Option<Payload>,
     last_pid: Option<u64>,
     fifo: VecDeque<(u64, Pipe, Payload)>,
@@ -330,6 +332,7 @@ impl SimGift {
             boot_time: 0,
             t_last: 0,
             preloaded: None,
+            pending: None,
             last_ack: None,
             last_pid: None,
             fifo: VecDeque::new(),
@@ -445,6 +448,7 @@ impl SimGift {
         self.shared = lboot::latch(prev, flags);
         self.fifo.clear();
         self.preloaded = None;
+        self.pending = None;
         self.last_ack = None;
         self.last_pid = None;
         self.radio_on_at = None;
@@ -511,6 +515,7 @@ impl SimGift {
         self.radio_on_at = None;
         self.fifo.clear();
         self.preloaded = None;
+        self.pending = None;
         self.boot_time = t;
         self.busy_until = t;
         let (radio, fault_at) = match self.app_fault {
@@ -600,7 +605,22 @@ impl SimGift {
                     true
                 }
             }
-            Mode::App { .. } => fifo_push(&mut self.fifo, (t, pipe, payload)),
+            Mode::App { .. } => {
+                let ok = fifo_push(&mut self.fifo, (t, pipe, payload));
+                // Real gifts often handle a unicast within the nRF's ~130 µs
+                // ack turnaround, so the reply rides on this packet's own ack.
+                if ok
+                    && pipe == Pipe::Unicast
+                    && self.fifo.len() == 1
+                    && self.busy_until <= t
+                    && w.rng.f32() * 100.0 < w.fast_reply_pct
+                {
+                    let (_, pipe, p) = self.fifo.pop_front().unwrap();
+                    self.busy_until = t + app_cost(&p);
+                    self.app_handle(t, pipe, p, w);
+                }
+                ok
+            }
             Mode::Off | Mode::Starting { .. } => false,
         };
         if !accepted {
@@ -902,9 +922,25 @@ impl SimGift {
             (Pipe::Broadcast, Packet::Broadcast(b)) => self.app_broadcast(t, b, w),
             (Pipe::Unicast, Packet::Unicast(u)) => {
                 self.echo = u.seq();
-                // Flush the TX FIFO, then preload exactly one reply.
+                let is_poll = matches!(u, Unicast::Poll { .. });
+                // Flush the TX FIFO, then preload exactly one reply. As in the
+                // firmware, a command reply survives the next REPLY_POLLS polls.
                 self.preloaded = None;
                 let r = self.app_unicast(t, u, w);
+                let r = match (is_poll, self.pending.as_mut()) {
+                    (false, _) if !matches!(r, Reply::Status(_)) => {
+                        self.pending = Some((r, lumigift_logic::recovery::REPLY_POLLS));
+                        r
+                    }
+                    (true, Some((rep, left))) if *left > 0 => {
+                        *left -= 1;
+                        *rep
+                    }
+                    _ => {
+                        self.pending = None;
+                        r
+                    }
+                };
                 self.preload(r);
             }
             _ => {}

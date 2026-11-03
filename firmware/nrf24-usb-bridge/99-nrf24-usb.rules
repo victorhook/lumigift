@@ -1,5 +1,0 @@
-# nrf24-usb bridge (pid.codes VID 0x1209, PID 0x0001): give logged-in users access.
-# Install:  sudo cp 99-nrf24-usb.rules /etc/udev/rules.d/
-#           sudo udevadm control --reload-rules && sudo udevadm trigger
-# Then unplug/replug the dongle.
-SUBSYSTEM=="usb", ATTRS{idVendor}=="1209", ATTRS{idProduct}=="0001", MODE="0660", TAG+="uaccess"

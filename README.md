@@ -37,9 +37,12 @@ cargo run --release -p lumigift-stage --example demo # just the 3D stage
 ## With hardware
 
 1. **Bridge dongle:** wire the nRF24 module to the F103 board, switch the board's
-   USB-C data lines from the CH340 to PA11/PA12, add a 1.5 kΩ pull-up on PA12, and
-   flash it with an ST-Link. See [`firmware/nrf24-usb-bridge/README.md`](firmware/nrf24-usb-bridge/README.md),
-   which also has the udev rule.
+   USB-C data lines from the CH340 to PA11/PA12, add a 1.5 kΩ pull-up from PA12 to
+   3V3 (the board has none: the CH340 had it built in), and flash it once with an
+   ST-Link (`firmware/nrf24-usb-bridge/flash-swd.sh`). After that it updates over
+   USB: `lumigift bridge-update <elf>`. See
+   [`firmware/nrf24-usb-bridge/README.md`](firmware/nrf24-usb-bridge/README.md), which
+   also has the udev rule.
 2. **Gifts (once per board, over SWD):** `cd firmware/lumigift && cargo xtask flash`
    writes the bootloader and the app. See [`firmware/lumigift/README.md`](firmware/lumigift/README.md).
 3. **From then on, update every gift over the air:**
