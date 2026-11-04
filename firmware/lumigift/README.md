@@ -21,7 +21,8 @@ firmware/lumigift/            own cargo workspace, default target thumbv6m-none-
 ├── app/                      lumigift-app: the gift application, 0x0800_2900, ≤ 19.75 KiB
 ├── xtask/                    host tool (own workspace): OTA image, size report + RAM-code check,
 │                             SWD flash, WRP removal
-└── flash.sh                  one-time SWD flash (wraps `cargo xtask flash`)
+├── flash_new.sh              new gift / full re-flash over SWD: unprotect, erase, flash
+└── flash.sh                  SWD flash keeping the config (wraps `cargo xtask flash`)
 ```
 
 ## Build
@@ -79,7 +80,8 @@ flash is busy, when any flash access would stall the CPU.
 otherwise STM32CubeProgrammer (`~/opt/STM32CubeProgrammer/bin` or on `PATH`):
 
 ```sh
-./flash.sh                         # = cargo xtask flash
+./flash_new.sh                     # new gift or full re-flash: unprotect + erase + flash
+./flash.sh                         # = cargo xtask flash (keeps node address and slot)
 ./flash.sh --dry-run               # only print the commands
 cargo xtask flash --erase          # first flash of a gift with old firmware: mass erase first
 cargo xtask flash --serial <SN>    # pick the ST-Link when several are connected (st-info --probe)
