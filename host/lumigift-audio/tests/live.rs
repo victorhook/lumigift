@@ -144,3 +144,33 @@ fn live_analysis_end_to_end_with_engine() {
         .count();
     assert_eq!(beats, 0, "events were already consumed by the first engine");
 }
+
+#[test]
+fn realtime_note_follows_a_melody() {
+    let sr = 44_100;
+    // G4 for 1.5 s, then D5 for 1.5 s (8 harmonics each).
+    let tone = |midi: f32, secs: f32| -> Vec<f32> {
+        let f0 = 440.0 * 2f32.powf((midi - 69.0) / 12.0);
+        (0..(secs * sr as f32) as usize)
+            .map(|i| {
+                let t = i as f32 / sr as f32;
+                0.2 * (1..=8)
+                    .map(|h| (std::f32::consts::TAU * f0 * h as f32 * t).sin() / h as f32)
+                    .sum::<f32>()
+            })
+            .collect()
+    };
+    let mut x = tone(67.0, 1.5);
+    x.extend(tone(74.0, 1.5));
+    let (_, frames) = run(&x, sr);
+    let class_at = |t: f64| {
+        let f = frames.iter().find(|f| f.time >= t).unwrap();
+        (f.features.pitch_class().unwrap(), f.features.tone_clarity())
+    };
+    for (t, want) in [(1.2, 7.0f32), (2.7, 2.0)] {
+        let (pc, clarity) = class_at(t);
+        let d = (pc - want).rem_euclid(12.0);
+        assert!(d.min(12.0 - d) < 0.4, "at {t} s: class {pc:.2}, want {want}");
+        assert!(clarity > 0.45, "at {t} s: clarity {clarity:.2}");
+    }
+}

@@ -88,6 +88,9 @@ pub struct RealtimeAnalyzer {
     /// When sound first appeared (drop detection waits for the AGC to settle).
     first_sound: Option<f64>,
     bass_flux_recent: VecDeque<f32>,
+    /// Causal running average of the chroma (the offline analysis smooths
+    /// it centred instead).
+    chroma: [[f32; dsp::CHROMA_BINS]; 2],
 }
 
 const HIST_SECONDS: f64 = 6.0;
@@ -105,6 +108,7 @@ impl RealtimeAnalyzer {
             // Half a window of zeros so frame i is centred at i * hop.
             pending: vec![0.0; fe.window_len / 2],
             fe,
+            chroma: [[0.0; dsp::CHROMA_BINS]; 2],
             frame_index: 0,
             agc: [Agc::default(); 4],
             flux_ref: 1.0,
@@ -208,6 +212,21 @@ impl RealtimeAnalyzer {
             level: self.agc[3].map(raw.rms_db, silent, dt),
             onset,
             rms_db: raw.rms_db,
+            tone: {
+                let taus = [dsp::CHROMA_SMOOTH_TAU.0, dsp::CHROMA_SMOOTH_TAU.1];
+                for (scale, tau) in self.chroma.iter_mut().zip(taus) {
+                    let a = 1.0 - (-dt / tau).exp();
+                    for (c, x) in scale.iter_mut().zip(&raw.chroma) {
+                        *c += (x - *c) * a;
+                    }
+                }
+                if silent {
+                    [0.0, 0.0]
+                } else {
+                    let (pc, clarity) = dsp::tone_of_scales(&self.chroma[0], &self.chroma[1]);
+                    FeatureFrame::tone_vector(pc, clarity)
+                }
+            },
         };
         let mut events = 0u8;
 

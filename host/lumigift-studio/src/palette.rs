@@ -54,6 +54,7 @@ pub enum PaletteAction {
     LightingEffect(u8),
     LightingPreset(usize),
     LightingFadeOut,
+    LightingOff,
     LightingRelease,
 }
 
@@ -125,6 +126,7 @@ pub fn build_commands(app: &App) -> Vec<Command> {
         v.push(cmd("Lighting", icons::STAR, &format!("Lighting: {}", p.name), None, A::LightingPreset(i)));
     }
     v.push(cmd("Lighting", icons::MOON, if app.lighting.fade_out { "Lighting: Fade in" } else { "Lighting: Fade out" }, None, A::LightingFadeOut));
+    v.push(cmd("Lighting", icons::POWER, "Lighting: Lights off", None, A::LightingOff));
     if app.lighting.armed {
         v.push(cmd("Lighting", icons::X, "Lighting: Release the gifts", None, A::LightingRelease));
     }

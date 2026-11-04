@@ -74,7 +74,7 @@ pub use analysis::{
 };
 pub use decode::{CoverArt, DecodedAudio, TrackMetadata, content_hash, decode_bytes, decode_file};
 pub use engine::ShowEngine;
-pub use features::{BeatPosition, FeatureFrame, FeatureProvider};
+pub use features::{BeatPosition, FeatureFrame, FeatureProvider, NOTE_NAMES};
 pub use job::{Job, JobContext};
 pub use loader::{LoadedTrack, analyze_async, load_track};
 pub use player::{OutputDevice, PlaybackState, Player};

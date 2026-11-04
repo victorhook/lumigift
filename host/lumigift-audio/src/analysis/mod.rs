@@ -3,7 +3,9 @@
 //! Pipeline (all on the mono mixdown, ~100 frames/s):
 //!
 //! 1. STFT (Hann, ~46 ms window, hop = sample_rate / 100) → bass / mid /
-//!    treble / RMS levels in dB, 32 log bands, spectral flux.
+//!    treble / RMS levels in dB, 32 log bands, spectral flux, and the
+//!    dominant pitch class + tone clarity (harmonic summation, see
+//!    `dsp::ToneDetector`).
 //! 2. Track-adaptive normalisation: each level is mapped from
 //!    `[max(p5, p97 - 30 dB), p97]` onto 0..=1 (then `^1.5`), so quiet and loud
 //!    masters both use the full LED range. Flux is divided by its 99th
@@ -44,7 +46,7 @@ use crate::features::{BeatPosition, FeatureFrame, FeatureProvider};
 use crate::job::JobContext;
 
 /// Bumped whenever the analysis output changes; part of the cache key.
-pub const ANALYSIS_VERSION: u32 = 2;
+pub const ANALYSIS_VERSION: u32 = 3;
 
 /// Systematic delay of the flux peak relative to the true attack, removed
 /// from onset and beat times (measured on synthetic drums).

@@ -77,7 +77,7 @@ cargo run -p lumigift-audio --release --example eagerness -- song.mp3   # how ju
 | `Waveform::buckets_in(t0, t1, n)` | min/max/RMS for exactly `n` pixels of any visible range |
 | `Spectrogram` | 32 log bands × ~50 columns/s as `u8` (`column`, `column_at`, `band_edges_hz`) |
 | `AnalysisCache` | `default_location()` (`~/.cache/lumigift/analysis`), `new(dir)`, `load(hash)`, `store(&a)` |
-| `ShowSettings` | `master_brightness`, `beat_flags`, `onset_flags`, `drop_flags`, and the reactivity settings `sensitivity`, `smoothing`, `intensity` (0..1, default 0.5) and `beat_sync: BeatSync::{Auto (default), On, Off}`; all `serde(default)` |
+| `ShowSettings` | `master_brightness`, `beat_flags`, `onset_flags`, `drop_flags`, and the reactivity settings `sensitivity`, `smoothing`, `intensity`, `note_color` (0..1, default 0.5) and `beat_sync: BeatSync::{Auto (default), On, Off}`; all `serde(default)` |
 | `Show` | `cues`, `events` (one-shots), `settings`, `track`; `load`/`save` (`.lgshow` JSON), `insert_cue`, `move_cue`, `remove_cue`, `split_at`, `cue_at`, `cue_index_at`, `insert_event`, `move_event`, `remove_event`, `events_at`, `auto_generate` |
 | `Cue` | `time`, `effect`, `palette`, `brightness`, `hue`, `hue_speed` (hue steps/s), `params`, `fade` (s), `slot_overrides`, `label` |
 | `OneShot` | `time`, `duration`, `kind`: `Strobe { rate_hz }`, `Blackout`, `Flash { hue, palette }` |
@@ -144,6 +144,23 @@ packets for them, or a future protocol revision can carry them.
   rate/100, so exactly 100 frames/s at 44.1 and 48 kHz. Per frame: bass
   20–150 Hz, mid 150–2000 Hz, treble 2–12 kHz, RMS, 32 log bands
   (30 Hz–16 kHz), spectral flux on floored band levels.
+* **Pitch** (`dsp::ToneDetector`, shared with the live analyzer): a
+  harmonic pitch-class profile. The strongest spectral peaks (80 Hz–5 kHz,
+  parabolically refined) vote for the fundamentals (80–1600 Hz,
+  1/3-semitone grid) they could be harmonic 1–10 of, weighted 0.85^(h−1) ×
+  amplitude; candidates without a peak of their own (pure subharmonics) are
+  gated out; the rest fold into 36 chroma bins (12 classes × 1/3 semitone).
+  The profile is smoothed on two time scales (offline centred ±70 / ±250 ms,
+  live causal τ 80 / 300 ms): the short one where it shows a clean note,
+  else the long one, so a melody gives its notes and a band mix its chord
+  changes rather than chord tones. The note is the root of the best-matching
+  template (single note, major or minor triad, cosine over 12 classes), which
+  keeps a sustained chord on its root when beating partials make the fifth
+  momentarily louder. Clarity is the root class's share of the profile,
+  mapped from 0.20–0.70 onto 0..1 (median shares: noise 0.12, drums 0.24,
+  speech 0.30, band mixes 0.29–0.57, solo violin 0.82). Stored per frame as
+  `FeatureFrame::tone`, a clarity-weighted point on the pitch circle
+  (interpolates without B→C jumps).
 * **Normalisation:** per track (never per section), each dB feature maps
   from `[max(p5, p97 − 30 dB), p97]` to 0..1, then `^1.5`, so it is relative
   to the track's loud passages (p97). Quiet and loud masters both use the
@@ -223,21 +240,48 @@ All deterministic and independent of the call rate:
   `slow + depth · (fast − slow)`, where `slow` is a 1.5 s phrase envelope and
   `depth = 2 · intensity · (0.5 + 0.5 · rhythm)`: unchanged on rhythmic
   music, half the in-phrase jitter on legato, while quiet phrases stay quiet
-  and loud ones loud. Solid, Breathe and Sparkle ignore loudness themselves,
-  so their brightness is scaled by `1 − a + a · phrase` (`a = 0.8 · intensity`,
-  phrase = the slow level envelope on a dB-linear scale): quiet passages
-  dimmer, never dark.
+  and loud ones loud. Effects that ignore loudness themselves (all but
+  Pulse, Spectrum, Chase, Strobe, Rainbow and Fire, see
+  `engine::follows_loudness`) get it through their brightness instead:
+  `× (1 − a + a · phrase)` (`a = 0.8 · intensity`, phrase = the slow level
+  envelope on a dB-linear scale), then `× (1 − k + k · drive)` with
+  `k = 1.2 · intensity` (max 0.9) and `drive = min(1, 0.65 · level + 0.5 · swell)`.
+  The **note swell** starts on every flagged onset (peak 0.6–1.0 by onset
+  strength) and on every legato change of a clean note (a new pitch class
+  held 40 ms, peak 0.5, ≥ 120 ms apart), rises in 15–45 ms and decays in 0.22–0.58 s
+  (both with smoothing). Sparkle and Twinkle already show onsets and get no
+  swell. Loud passages sit a little below full so each note still lifts them.
+* **Note colour** (default 0.5): the hue moves by
+  `note_color · 256/12` per semitone of the note being played. The engine
+  keeps an unwrapped note on the 10 ms grid that glides the shortest way
+  round to each frame's class with clarity ≥ `engine::NOTE_MIN_CLARITY`
+  (0.1), with τ = (20 + 100·s) ms for clean notes (clarity ≥
+  `engine::NOTE_CLEAR`, 0.45) and `× (0.45 / clarity)²` below (a band's
+  harmony drifts over ~0.3–1 s), and holds through drums and silence. At 1.0
+  every pitch class has its own place in the palette; at 0 the cue colours
+  are unchanged. The frame's `hue` already exists, so the gifts need no
+  firmware change.
+
+  Measured on 12 tracks (Solid look, note colour 0.5): 97–100 % of the
+  detected note weight falls on 7 pitch classes (one key); clean notes
+  50–90 % of the time on solo or lead-heavy music (violin, ukulele, sax),
+  13–27 % on dense band mixes, which follow their harmony instead; colour
+  moves 25–60 °/s on most music, up to ~140 °/s for fast melodies, 35 °/s on
+  speech; no brightness jumps > 40 % in 50 ms on Solid.
 * **Auto-generated shows** use the per-section rhythm confidence: sections
-  without a pulse get Breathe / Solid (slow hue drift), plus Spectrum /
-  Sparkle when medium and Rainbow when intense, 3 s cross-fades, a cue every
+  without a pulse lead with Solid (it shows the note colour and swells most
+  clearly), then Breathe, plus Spectrum / Sparkle when medium and Spectrum /
+  Rainbow when intense, 3 s cross-fades, a cue every
   ~24 s and no Strobe, Pulse, Chase, blackouts or flashes. Rhythmic sections
   are generated exactly as before.
 
 `examples/eagerness.rs` (and `eagerness::measure`, used by `tests/sync.rs`)
 renders a show through the engine and ten `lumigift_fx::Renderer`s at 100 Hz
 and reports BEAT / ONSET flags per minute, brightness jumps > 40 % within
-50 ms per gift per minute, the mean |Δbrightness| per 10 ms frame, and the
-correlation between brightness and loudness (per second). Auto shows, before
+50 ms per gift per minute, the mean |Δbrightness| per 10 ms frame, the
+correlation between brightness and loudness (per second), and the colour
+motion (mean |Δhue| in degrees per second; the solo violin's auto show moves
+~60°/s with note colour, a few °/s from cue drift alone). Auto shows, before
 → after this tuning:
 
 | Track | BEAT/min | ONSET/min | jumps/min | mean Δ %/frame | r(brightness, loudness) |

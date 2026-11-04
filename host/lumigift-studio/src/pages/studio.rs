@@ -80,6 +80,8 @@ pub struct Studio {
     pub gen_keep: bool,
     pub editing_time: Option<String>,
     pub last_frame: Option<MusicFrame>,
+    /// What the engine hears at the preview time (the stage readout).
+    pub hearing: Option<Hearing>,
     clipboard: Vec<Cue>,
     pub fit_pending: bool,
     pub upper_tab: usize,
@@ -103,6 +105,22 @@ pub enum RadioPath {
 /// Worst-case delay from `link.set_show` to a simulated gift having the frame:
 /// one 10 ms show tick plus ~1 ms of simulated USB and air time.
 pub const SIM_PIPELINE: f64 = 0.011;
+
+/// What the show engine hears at the preview time, for the stage readout.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Hearing {
+    /// Media time of this snapshot.
+    pub t: f64,
+    /// The note the colour follows (pitch class 0..12) and how clearly the
+    /// audio is pitched right now (0..=1).
+    pub note: Option<f32>,
+    pub clarity: f32,
+    /// Bass, mid, treble and level as the engine sends them (0..=1).
+    pub bands: [f32; 4],
+    /// Media time of the last onset / beat flagged on the preview.
+    pub onset_t: Option<f64>,
+    pub beat_t: Option<f64>,
+}
 
 /// The frames of one display frame (see [`Studio::tick`]).
 #[derive(Clone, Copy, Debug)]
@@ -162,6 +180,7 @@ impl Studio {
             gen_keep: true,
             editing_time: None,
             last_frame: None,
+            hearing: None,
             clipboard: Vec::new(),
             fit_pending: false,
             upper_tab: 0,
@@ -476,6 +495,23 @@ impl Studio {
         };
         let radio = radio_t.map(|t| if playing { engine.frame_at(t, slots) } else { engine.peek_frame(t, slots) });
         self.last_frame = Some(preview);
+        // The readout follows the preview's time line.
+        let feat = engine.provider().features_at(preview_t);
+        let note = if playing {
+            self.preview_cursor.note()
+        } else {
+            feat.pitch_class().filter(|_| feat.tone_clarity() >= lumigift_audio::engine::NOTE_MIN_CLARITY)
+        };
+        let prev = self.hearing.filter(|h| playing && preview_t >= h.t && preview_t - h.t < 0.5);
+        let flag = |bit: u8, old: Option<f64>| if preview.flags & bit != 0 { Some(preview_t) } else { old };
+        self.hearing = Some(Hearing {
+            t: preview_t,
+            note,
+            clarity: feat.tone_clarity(),
+            bands: [preview.bass, preview.mid, preview.treble, preview.level].map(|v| v as f32 / 255.0),
+            onset_t: flag(lumigift_proto::music_flags::ONSET, prev.and_then(|h| h.onset_t)),
+            beat_t: flag(lumigift_proto::music_flags::BEAT, prev.and_then(|h| h.beat_t)),
+        });
         Some(TickFrames { preview, radio })
     }
 
@@ -1318,6 +1354,9 @@ fn stage_preview(app: &mut App, ui: &mut Ui, rect: Rect) {
         crate::stage::fit_tight(&mut app.stage_preview, &gifts, rect.width() / rect.height().max(1.0));
     }
     app.stage_preview.show(ui, &gifts, &opts);
+    if let Some(h) = app.studio.hearing {
+        hearing_readout(ui, rect, &h, app.studio.last_frame.as_ref());
+    }
     // Floating buttons bottom-right.
     let br = Rect::from_min_size(rect.right_bottom() - vec2(196.0, 48.0), vec2(184.0, 36.0));
     let mut c = ui.new_child(egui::UiBuilder::new().max_rect(br).layout(Layout::right_to_left(Align::Center)));
@@ -1333,6 +1372,72 @@ fn stage_preview(app: &mut App, ui: &mut Ui, rect: Rect) {
         ui.painter().text(rect.left_top() + vec2(14.0, 14.0), Align2::LEFT_TOP, format!("{}  Mirroring the gifts", icons::BROADCAST), theme::font("small_medium"), ACCENT_TEXT);
     } else {
         ui.painter().text(rect.left_top() + vec2(14.0, 14.0), Align2::LEFT_TOP, "Preview", theme::font("small_medium"), TEXT_FAINT);
+    }
+}
+
+/// "What the engine hears" panel, bottom-left of the stage preview: the note
+/// the colour follows (with the colour it maps to), the bands as sent, and
+/// onset / beat dots. Helps judge whether the lights miss the music or the
+/// analysis does.
+fn hearing_readout(ui: &mut Ui, stage: Rect, h: &Hearing, frame: Option<&MusicFrame>) {
+    let size = vec2(244.0, 78.0);
+    if stage.width() < size.x + 220.0 || stage.height() < size.y + 60.0 {
+        return;
+    }
+    let r = Rect::from_min_size(stage.left_bottom() + vec2(12.0, -12.0 - size.y), size);
+    let p = ui.painter_at(r.expand(1.0));
+    p.rect_filled(r, CornerRadius::same(R_MD), theme::alpha(SURFACE_1, 0.86));
+    p.rect_stroke(r, CornerRadius::same(R_MD), Stroke::new(1.0, BORDER_SUBTLE), StrokeKind::Inside);
+    p.text(r.left_top() + vec2(10.0, 8.0), Align2::LEFT_TOP, "HEARING", theme::font("overline"), TEXT_FAINT);
+
+    // Note + the colour it maps to.
+    let x0 = r.left() + 10.0;
+    let cy = r.top() + 40.0;
+    match h.note {
+        Some(n) => {
+            let name = lumigift_audio::NOTE_NAMES[(n.round() as usize) % 12];
+            let a = 0.45 + 0.55 * h.clarity.clamp(0.0, 1.0);
+            p.text(pos2(x0, cy), Align2::LEFT_CENTER, name, theme::font("metric"), theme::alpha(TEXT, a));
+            if let Some(f) = frame.filter(|f| (f.palette as usize) < PALETTES.len()) {
+                let c = lumigift_fx::palette(&PALETTES[f.palette as usize], f.hue);
+                p.circle_filled(pos2(x0 + 40.0, cy), 6.0, widgets::rgb32(c));
+                p.circle_stroke(pos2(x0 + 40.0, cy), 6.0, Stroke::new(1.0, BORDER_SUBTLE));
+            }
+        }
+        None => {
+            p.text(pos2(x0, cy), Align2::LEFT_CENTER, "—", theme::font("metric"), TEXT_FAINT);
+        }
+    }
+    let status = if h.clarity >= lumigift_audio::engine::NOTE_CLEAR {
+        format!("clear {:.0}%", h.clarity * 100.0)
+    } else if h.clarity >= lumigift_audio::engine::NOTE_MIN_CLARITY {
+        format!("harmony {:.0}%", h.clarity * 100.0)
+    } else if h.note.is_some() {
+        "holding".to_string()
+    } else {
+        "no pitch yet".to_string()
+    };
+    p.text(pos2(x0, r.bottom() - 7.0), Align2::LEFT_BOTTOM, status, theme::font("small"), TEXT_FAINT);
+
+    // Bands as the engine sends them.
+    let bx = r.left() + 104.0;
+    let (bt, bb) = (r.top() + 12.0, r.bottom() - 22.0);
+    for (i, (v, l)) in h.bands.iter().zip(["B", "M", "T", "L"]).enumerate() {
+        let x = bx + i as f32 * 16.0;
+        let track = Rect::from_min_max(pos2(x, bt), pos2(x + 8.0, bb));
+        p.rect_filled(track, CornerRadius::same(2), BG_SUNKEN);
+        let fill = Rect::from_min_max(pos2(x, bb - (bb - bt) * v.clamp(0.0, 1.0)), pos2(x + 8.0, bb));
+        p.rect_filled(fill, CornerRadius::same(2), if i == 3 { TEXT_SECONDARY } else { INFO });
+        p.text(pos2(x + 4.0, r.bottom() - 7.0), Align2::CENTER_BOTTOM, l, theme::font("small"), TEXT_FAINT);
+    }
+
+    // Onset / beat dots, fading for 300 ms after each flag.
+    let lit = |at: Option<f64>| at.map_or(0.0, |a| (1.0 - ((h.t - a) / 0.3) as f32).clamp(0.0, 1.0));
+    for (k, (at, col, label)) in [(h.onset_t, ACCENT, "note"), (h.beat_t, OK, "beat")].into_iter().enumerate() {
+        let c = pos2(r.left() + 190.0 + k as f32 * 32.0, cy - 2.0);
+        let a = lit(at);
+        p.circle_filled(c, 6.0, theme::mix(SURFACE_3, col, a));
+        p.text(pos2(c.x, r.bottom() - 7.0), Align2::CENTER_BOTTOM, label, theme::font("small"), TEXT_FAINT);
     }
 }
 
@@ -1653,7 +1758,7 @@ fn reactivity(s: &mut Studio, ui: &mut Ui) {
     let pos = s.position();
     let rhythm = s.engine.as_ref().map(|e| e.rhythm_at(pos)).unwrap_or(0.0);
     let syncing = s.engine.as_ref().is_some_and(|e| e.beat_sync_active(pos));
-    let lw = 72.0;
+    let lw = 84.0;
     ui.horizontal(|ui| {
         widgets::overline(ui, "Reactivity").on_hover_text("How eagerly the lights react to the music. Saved with the show; double-click a slider to reset it.");
         if !settings.reactivity_is_default() {
@@ -1696,13 +1801,14 @@ fn reactivity(s: &mut Studio, ui: &mut Ui) {
     .on_hover_text("Rhythm confidence: how clearly the music has a steady pulse at the playhead. Auto follows the beat where it is at least 50%; elsewhere the lights flow with the phrasing instead.");
     ui.add_space(4.0);
     // Sliders, one undo step per drag gesture.
-    let rows: [(&str, f32, &str); 3] = [
+    let rows: [(&str, f32, &str); 4] = [
         ("Sensitivity", settings.sensitivity, "How many attacks flash and sparkle: low = only the strongest, high = every note"),
         ("Smoothing", settings.smoothing, "How softly levels rise and fall: low = snappy, high = flowing"),
-        ("Intensity", settings.intensity, "How strongly loudness drives the lights: low = calm, high = dramatic"),
+        ("Intensity", settings.intensity, "How strongly loudness and each new note drive the lights: low = calm, high = dramatic"),
+        ("Note colour", settings.note_color, "How far the notes being played move the colour through the palette: 0 = cue colours only, 100% = every note has its own colour"),
     ];
     let mut gesture = false;
-    let mut new = [settings.sensitivity, settings.smoothing, settings.intensity];
+    let mut new = [settings.sensitivity, settings.smoothing, settings.intensity, settings.note_color];
     for (k, (label, value, tip)) in rows.into_iter().enumerate() {
         ui.horizontal(|ui| {
             widgets::column_label(ui, label, lw, CONTROL_H, TEXT_MUTED);
@@ -1718,7 +1824,7 @@ fn reactivity(s: &mut Studio, ui: &mut Ui) {
             new[k] = v / 100.0;
         });
     }
-    if new != [settings.sensitivity, settings.smoothing, settings.intensity] {
+    if new != [settings.sensitivity, settings.smoothing, settings.intensity, settings.note_color] {
         if gesture {
             s.checkpoint();
         }
@@ -1726,6 +1832,7 @@ fn reactivity(s: &mut Studio, ui: &mut Ui) {
             sh.settings.sensitivity = new[0];
             sh.settings.smoothing = new[1];
             sh.settings.intensity = new[2];
+            sh.settings.note_color = new[3];
         }
         s.dirty = true;
     }

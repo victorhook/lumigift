@@ -137,7 +137,7 @@ impl Lights {
                 LightSource::Blackout => {}
                 LightSource::Show(frame) => {
                     let r = self.renderers.entry(g.uid).or_insert_with(|| {
-                        Renderer::new(u32::from_le_bytes([g.uid.0[8], g.uid.0[9], g.uid.0[10], g.uid.0[11]]))
+                        Renderer::new(uid_seed(&g.uid))
                     });
                     r.on_frame(&frame, now_ms);
                     let slot = g.slot.unwrap_or(0);
@@ -175,7 +175,7 @@ impl Lights {
         for g in &snap.gifts {
             let slot = g.slot.unwrap_or(lumigift_proto::UNASSIGNED_SLOT);
             let r = self.renderers.entry(g.uid).or_insert_with(|| {
-                Renderer::new(u32::from_le_bytes([g.uid.0[8], g.uid.0[9], g.uid.0[10], g.uid.0[11]]))
+                Renderer::new(uid_seed(&g.uid))
             });
             for f in layers {
                 r.on_frame_for(f, now_ms, slot);
@@ -207,6 +207,13 @@ impl Lights {
             })
             .collect()
     }
+}
+
+/// Renderer seed from the whole UID (the trailing lot bytes alone are the
+/// same for a batch of chips, which would give their gifts one random stream).
+fn uid_seed(uid: &Uid) -> u32 {
+    let h = crate::pages::stage_page::uid_id(uid);
+    (h ^ (h >> 32)) as u32
 }
 
 /// Send helper: what the show stream should broadcast.

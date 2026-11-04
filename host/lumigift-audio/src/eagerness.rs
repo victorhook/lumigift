@@ -38,6 +38,9 @@ pub struct Eagerness {
     /// track's loudness (feature `level`), both averaged per second, over
     /// non-silent seconds: does the show follow the phrasing and dynamics?
     pub dynamics_correlation: f64,
+    /// Mean colour motion: the frames' hue change (shortest way round),
+    /// in degrees of the palette circle per second.
+    pub hue_deg_per_s: f64,
 }
 
 /// Perceived brightness of a gift, 0..=1: the mean over its LEDs of the
@@ -59,6 +62,8 @@ pub fn measure(provider: Arc<dyn FeatureProvider>, show: Show) -> Eagerness {
     let n = (duration * 100.0).floor() as usize;
     let mut history: Vec<Vec<f32>> = vec![Vec::with_capacity(n); GIFTS as usize];
     let (mut beats, mut onsets) = (0usize, 0usize);
+    let mut hue_moved = 0.0f64;
+    let mut last_hue: Option<u8> = None;
     for i in 0..n {
         let t = i as f64 / 100.0;
         let ms = i as u32 * 10;
@@ -69,6 +74,11 @@ pub fn measure(provider: Arc<dyn FeatureProvider>, show: Show) -> Eagerness {
         } else {
             feat.level
         });
+        if let Some(h) = last_hue {
+            let d = f.hue.wrapping_sub(h);
+            hue_moved += d.min(0u8.wrapping_sub(d)) as f64;
+        }
+        last_hue = Some(f.hue);
         beats += (f.flags & music_flags::BEAT != 0) as usize;
         onsets += (f.flags & music_flags::ONSET != 0) as usize;
         for (slot, r) in renderers.iter_mut().enumerate() {
@@ -122,6 +132,7 @@ pub fn measure(provider: Arc<dyn FeatureProvider>, show: Show) -> Eagerness {
         onsets_per_min: onsets as f64 / minutes,
         jumps_per_min: jumps as f64 / GIFTS as f64 / minutes,
         mean_abs_delta_pct: 100.0 * delta_sum / delta_n.max(1) as f64,
+        hue_deg_per_s: hue_moved * 360.0 / 256.0 / duration.max(1e-6),
     }
 }
 

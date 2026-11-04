@@ -22,8 +22,17 @@ pub(crate) fn analyze_with(mono: &[f32], sample_rate: u32, ctx: &JobContext) -> 
     ctx.set_stage("Detecting beats");
     ctx.set_progress(0.6);
 
-    // 2. Normalisation.
-    let (frames, silent) = normalise(&raw);
+    // 2. Normalisation, and the note from the smoothed chroma.
+    let (mut frames, silent) = normalise(&raw);
+    let chroma: Vec<[f32; dsp::CHROMA_BINS]> = raw.iter().map(|r| r.chroma).collect();
+    let short = dsp::smooth_chroma(&chroma, dsp::CHROMA_SMOOTH_HALF.0);
+    let long = dsp::smooth_chroma(&chroma, dsp::CHROMA_SMOOTH_HALF.1);
+    for (((f, s), l), &silent) in frames.iter_mut().zip(&short).zip(&long).zip(&silent) {
+        if !silent {
+            let (pc, clarity) = dsp::tone_of_scales(s, l);
+            f.tone = FeatureFrame::tone_vector(pc, clarity);
+        }
+    }
 
     // 3. Onsets (vibrato-suppressed flux, adaptive threshold).
     let bands: Vec<[f32; N_BANDS]> = raw.iter().map(|r| r.bands_db).collect();
@@ -221,6 +230,7 @@ fn normalise(raw: &[RawFrame]) -> (Vec<FeatureFrame>, Vec<bool>) {
                     level: dsp::map_db(r.rms_db, nl.0, nl.1),
                     onset: (r.flux / flux_ref).min(1.0),
                     rms_db: r.rms_db,
+                    tone: [0.0, 0.0],
                 }
             }
         })

@@ -235,3 +235,80 @@ fn analysis_of_four_minutes_is_fast() {
     assert!(a.analysis_seconds < limit, "took {} s", a.analysis_seconds);
     assert!((a.bpm - 124.0).abs() <= 2.0);
 }
+
+/// A tone with `n` harmonics (amplitude 1/h), optional vibrato (semitones).
+fn harmonic_tone(f0: f32, secs: f32, sr: u32, n: usize, vibrato_st: f32) -> Vec<f32> {
+    let len = (secs * sr as f32) as usize;
+    let mut phase = vec![0f64; n];
+    (0..len)
+        .map(|i| {
+            let t = i as f32 / sr as f32;
+            let f = f0 * 2f32.powf(vibrato_st * (std::f32::consts::TAU * 5.5 * t).sin() / 12.0);
+            let mut v = 0.0;
+            for (h, ph) in phase.iter_mut().enumerate() {
+                let h = h + 1;
+                *ph += std::f64::consts::TAU * (f as f64 * h as f64) / sr as f64;
+                v += ph.sin() as f32 / h as f32;
+            }
+            0.2 * v
+        })
+        .collect()
+}
+
+/// Median pitch class and clarity over the middle of a signal.
+fn tone_of(samples: &[f32], sr: u32) -> (Option<f32>, f32) {
+    let a = Analysis::analyze(samples, sr);
+    let mid = &a.frames[a.frames.len() / 4..3 * a.frames.len() / 4];
+    let mut cl: Vec<f32> = mid.iter().map(|f| f.tone_clarity()).collect();
+    cl.sort_by(f32::total_cmp);
+    let mut pcs: Vec<f32> = mid.iter().filter_map(|f| f.pitch_class()).collect();
+    pcs.sort_by(f32::total_cmp);
+    (pcs.get(pcs.len() / 2).copied(), cl[cl.len() / 2])
+}
+
+fn pc_err(a: f32, b: f32) -> f32 {
+    let d = (a - b).rem_euclid(12.0);
+    d.min(12.0 - d)
+}
+
+#[test]
+fn pitch_class_of_tones() {
+    let sr = 44_100;
+    // (MIDI note, harmonics, vibrato)
+    for &(midi, n, vib) in &[
+        (43.0f32, 8, 0.0),  // G2, low
+        (55.0, 8, 0.0),     // G3, violin's lowest string
+        (60.0, 1, 0.0),     // C4, pure sine
+        (64.0, 10, 0.25),   // E4 with violin-like vibrato
+        (69.0, 6, 0.0),     // A4
+        (73.0, 8, 0.2),     // C#5
+        (83.0, 4, 0.0),     // B5
+    ] {
+        let f0 = 440.0 * 2f32.powf((midi - 69.0) / 12.0);
+        let (pc, clarity) = tone_of(&harmonic_tone(f0, 3.0, sr, n, vib), sr);
+        let pc = pc.expect("a tone has a pitch");
+        let want = midi.rem_euclid(12.0);
+        assert!(pc_err(pc, want) < 0.35, "MIDI {midi}: got class {pc:.2}, want {want}");
+        assert!(clarity > 0.5, "MIDI {midi}: clarity {clarity:.2}");
+    }
+}
+
+#[test]
+fn noise_and_drums_are_not_pitched() {
+    let sr = 44_100;
+    let mut x = 12345u32;
+    let noise: Vec<f32> = (0..sr as usize * 3)
+        .map(|_| {
+            x ^= x << 13;
+            x ^= x >> 17;
+            x ^= x << 5;
+            (x as f32 / u32::MAX as f32 - 0.5) * 0.4
+        })
+        .collect();
+    let (_, clarity) = tone_of(&noise, sr);
+    assert!(clarity < 0.2, "white noise clarity {clarity:.2}");
+
+    let drums = synth::render(&[Part { bass: false, ..Part::groove(12.0, 120.0, 0.8) }], sr);
+    let (_, clarity) = tone_of(&drums.samples, sr);
+    assert!(clarity < 0.35, "drums clarity {clarity:.2}");
+}

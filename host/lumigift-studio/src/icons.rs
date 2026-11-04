@@ -12,6 +12,7 @@ pub const RADIO: &str = "\u{e77e}";
 pub const BATTERY_WARNING: &str = "\u{e0c8}";
 pub const LIGHTNING: &str = "\u{e2de}";
 pub const LIGHTNING_SLASH: &str = "\u{e2e0}";
+pub const POWER: &str = "\u{e3da}";
 pub const HAND_TAP: &str = "\u{ec90}";
 pub const TAG: &str = "\u{e478}";
 pub const PENCIL: &str = "\u{e3b4}";

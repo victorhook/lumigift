@@ -71,6 +71,7 @@ fn main() {
     print_row("auto show", &measure(a.clone(), auto));
     // Fixed looks isolate the engine from the auto generator's choices.
     for (label, fx) in [
+        ("Solid", lumigift_fx::effect::SOLID),
         ("Pulse", lumigift_fx::effect::PULSE),
         ("Sparkle", lumigift_fx::effect::SPARKLE),
         ("Spectrum", lumigift_fx::effect::SPECTRUM),
@@ -83,11 +84,12 @@ fn main() {
 
 fn print_row(label: &str, e: &Eagerness) {
     println!(
-        "  {label:<10} BEAT {:6.1}/min  ONSET {:6.1}/min  jumps>40%/50ms {:6.1}/min/gift  mean |Δbrightness| {:5.2} %/frame  r(brightness, loudness) {:+.2}",
+        "  {label:<10} BEAT {:6.1}/min  ONSET {:6.1}/min  jumps>40%/50ms {:6.1}/min/gift  mean |Δbrightness| {:5.2} %/frame  r(brightness, loudness) {:+.2}  colour {:5.1}°/s",
         e.beats_per_min,
         e.onsets_per_min,
         e.jumps_per_min,
         e.mean_abs_delta_pct,
-        e.dynamics_correlation
+        e.dynamics_correlation,
+        e.hue_deg_per_s
     );
 }

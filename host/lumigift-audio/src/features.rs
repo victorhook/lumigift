@@ -25,7 +25,19 @@ pub struct FeatureFrame {
     pub onset: f32,
     /// Absolute RMS level in dBFS (not normalised; used for silence detection).
     pub rms_db: f32,
+    /// Dominant pitch class as a point on the pitch circle:
+    /// `clarity · (cos θ, sin θ)` with `θ = 2π · class / 12` (C = 0). The
+    /// length is how clearly the frame is pitched (0 = noise, drums,
+    /// silence). A vector so frames interpolate without jumping from B to C.
+    /// See [`FeatureFrame::pitch_class`] and [`FeatureFrame::tone_clarity`].
+    #[serde(default)]
+    pub tone: [f32; 2],
 }
+
+/// Note names by pitch class (C = 0).
+pub const NOTE_NAMES: [&str; 12] = [
+    "C", "C♯", "D", "D♯", "E", "F", "F♯", "G", "G♯", "A", "A♯", "B",
+];
 
 impl FeatureFrame {
     /// The frame reported outside the signal: all zero, RMS at -120 dBFS.
@@ -36,6 +48,7 @@ impl FeatureFrame {
         level: 0.0,
         onset: 0.0,
         rms_db: -120.0,
+        tone: [0.0, 0.0],
     };
 
     /// Linear interpolation between two frames.
@@ -48,7 +61,26 @@ impl FeatureFrame {
             level: l(self.level, o.level),
             onset: l(self.onset, o.onset),
             rms_db: l(self.rms_db, o.rms_db),
+            tone: [l(self.tone[0], o.tone[0]), l(self.tone[1], o.tone[1])],
         }
+    }
+
+    /// The `tone` vector for a pitch class (0..12) and clarity (0..=1).
+    pub fn tone_vector(pitch_class: f32, clarity: f32) -> [f32; 2] {
+        let a = pitch_class / 12.0 * std::f32::consts::TAU;
+        [clarity * a.cos(), clarity * a.sin()]
+    }
+
+    /// How clearly the frame is pitched, 0..=1.
+    pub fn tone_clarity(&self) -> f32 {
+        self.tone[0].hypot(self.tone[1]).min(1.0)
+    }
+
+    /// Dominant pitch class 0.0..12.0 (C = 0), or `None` if the frame is
+    /// not pitched at all.
+    pub fn pitch_class(&self) -> Option<f32> {
+        (self.tone_clarity() > 1e-3)
+            .then(|| (self.tone[1].atan2(self.tone[0]) / std::f32::consts::TAU * 12.0).rem_euclid(12.0))
     }
 
     /// True when the frame is effectively silent.

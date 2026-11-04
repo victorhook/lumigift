@@ -26,8 +26,11 @@ impl Default for StagePage {
     }
 }
 
-fn uid_id(u: &Uid) -> u64 {
-    u64::from_le_bytes(u.0[4..12].try_into().unwrap())
+/// Stage id of a gift: a hash of the whole UID. (Bytes 4..12 alone are the
+/// wafer and lot number, the same for every chip of a batch: three such
+/// gifts all got one id, so clicks always selected the first.)
+pub fn uid_id(u: &Uid) -> u64 {
+    u.0.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &b| (h ^ b as u64).wrapping_mul(0x100_0000_01b3))
 }
 
 /// Stage gifts for every known gift (positions from the persisted layout;
@@ -307,4 +310,27 @@ pub fn floating(ui: &mut Ui, rect: Rect, add: impl FnOnce(&mut Ui)) {
     widgets::top_highlight(p, rect, R_LG as f32);
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(12.0)).layout(Layout::top_down(Align::Min)));
     add(&mut child);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn gifts_of_one_batch_get_distinct_stage_ids() {
+        // Same wafer and lot (bytes 4..12), different die positions: the
+        // three gifts that all selected as the first one.
+        let lot = [0x0b, 0x38, 0x31, 0x32, 0x30, 0x57, 0x4e, 0x33];
+        let uid = |x: u8, y: u8| {
+            let mut u = [0u8; 12];
+            u[..4].copy_from_slice(&[x, 0, y, 0]);
+            u[4..].copy_from_slice(&lot);
+            Uid(u)
+        };
+        let ids: std::collections::BTreeSet<u64> = [uid(0x30, 0xb4), uid(0x2f, 0xb4), uid(0x30, 0xb5)]
+            .iter()
+            .map(uid_id)
+            .collect();
+        assert_eq!(ids.len(), 3);
+    }
 }

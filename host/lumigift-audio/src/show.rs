@@ -181,19 +181,26 @@ pub struct ShowSettings {
     pub intensity: f32,
     /// Reactivity: beat sync mode.
     pub beat_sync: BeatSync,
+    /// Reactivity: how far the notes being played move the colour, 0..=1.
+    /// 0 = colours come from the cues only; 1 = each semitone moves the hue
+    /// 1/12 of the way round the palette, so every pitch class has its own
+    /// colour. In between, melodies still glide through the palette.
+    pub note_color: f32,
 }
 
 impl ShowSettings {
     pub const DEFAULT_SENSITIVITY: f32 = 0.5;
     pub const DEFAULT_SMOOTHING: f32 = 0.5;
     pub const DEFAULT_INTENSITY: f32 = 0.5;
+    pub const DEFAULT_NOTE_COLOR: f32 = 0.5;
 
-    /// Default `[sensitivity, smoothing, intensity]`.
-    pub const fn default_reactivity() -> [f32; 3] {
+    /// Default `[sensitivity, smoothing, intensity, note_color]`.
+    pub const fn default_reactivity() -> [f32; 4] {
         [
             Self::DEFAULT_SENSITIVITY,
             Self::DEFAULT_SMOOTHING,
             Self::DEFAULT_INTENSITY,
+            Self::DEFAULT_NOTE_COLOR,
         ]
     }
 
@@ -204,6 +211,7 @@ impl ShowSettings {
             && self.smoothing == d.smoothing
             && self.intensity == d.intensity
             && self.beat_sync == d.beat_sync
+            && self.note_color == d.note_color
     }
 
     /// Reset sensitivity, smoothing, intensity and beat sync.
@@ -213,6 +221,7 @@ impl ShowSettings {
         self.smoothing = d.smoothing;
         self.intensity = d.intensity;
         self.beat_sync = d.beat_sync;
+        self.note_color = d.note_color;
     }
 }
 
@@ -227,6 +236,7 @@ impl Default for ShowSettings {
             smoothing: Self::DEFAULT_SMOOTHING,
             intensity: Self::DEFAULT_INTENSITY,
             beat_sync: BeatSync::Auto,
+            note_color: Self::DEFAULT_NOTE_COLOR,
         }
     }
 }
@@ -462,15 +472,17 @@ impl Show {
             palette::ICE,
         ];
 
-        // Sections without a pulse: no beat-driven or flashing effects.
-        const LEGATO_CALM_FX: [u8; 2] = [effect::BREATHE, effect::SOLID];
+        // Sections without a pulse: no beat-driven or flashing effects. Solid
+        // leads: it shows the engine's note colour and per-note swells most
+        // clearly (see `engine` § Note colour).
+        const LEGATO_CALM_FX: [u8; 2] = [effect::SOLID, effect::BREATHE];
         const LEGATO_MED_FX: [u8; 4] = [
-            effect::BREATHE,
-            effect::SPECTRUM,
             effect::SOLID,
+            effect::SPECTRUM,
+            effect::BREATHE,
             effect::SPARKLE,
         ];
-        const LEGATO_HIGH_FX: [u8; 3] = [effect::SPECTRUM, effect::RAINBOW, effect::BREATHE];
+        const LEGATO_HIGH_FX: [u8; 3] = [effect::SOLID, effect::SPECTRUM, effect::RAINBOW];
         /// Cue length within a long section without a pulse, seconds.
         const LEGATO_VARIATION_S: f64 = 24.0;
 

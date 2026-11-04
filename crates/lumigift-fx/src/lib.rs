@@ -22,12 +22,14 @@
 //! advances `1 + s²/128` / 65536 cycles per ms (a 22 s cycle at `s = 16`,
 //! 0.5 s at 128, 0.13 s at 255).
 //!
-//! Spatial looks (Knight Rider, Comet, Waterfall, Theater chase, Colour wipe)
-//! treat the gifts in slot order as one virtual strip: all `slot_count`
-//! slots (`slot_count × 4` LEDs) for a frame to everyone, or only the gifts
-//! in the frame's mask for a group frame (so a Knight Rider on a group
-//! bounces across that group). Per-slot offsets (Fade spread, Blink
-//! alternate, …) follow the same positions.
+//! A gift always lights its four LEDs in one colour: they sit together in a
+//! frosted box, where different colours only blend into a muddy mix.
+//! Patterns move across the gifts instead. Spatial looks (Knight Rider,
+//! Comet, Waterfall, Theater chase, Colour wipe, the Spectrum equaliser)
+//! treat the gifts in slot order as one row: all `slot_count` slots for a
+//! frame to everyone, or only the gifts in the frame's mask for a group
+//! frame (so a Knight Rider on a group bounces across that group). Per-slot
+//! offsets (Fade spread, Blink alternate, …) follow the same positions.
 //!
 //! # Groups, custom colours, crossfades
 //!
@@ -58,7 +60,7 @@ pub mod effect {
     pub const COUNT: u8 = 8;
     /// Smooth colour cycling through the palette, optionally offset per slot.
     pub const FADE: u8 = 8;
-    /// Colour flowing down each gift's LEDs and across the gifts.
+    /// A colour wave flowing across the gifts.
     pub const WATERFALL: u8 = 9;
     /// Knight Rider: a head with a fading tail bouncing across all gifts.
     pub const SCANNER: u8 = 10;
@@ -78,7 +80,7 @@ pub mod effect {
     pub const STROBE_TIMED: u8 = 17;
     /// A decaying pulse at a fixed rate, independent of beats.
     pub const PULSE_TIMED: u8 = 18;
-    /// Fills the strip LED by LED with the next colour.
+    /// Fills the row gift by gift with the next colour.
     pub const WIPE: u8 = 19;
     /// Number of effects (ids `0..ALL`).
     pub const ALL: u8 = 20;
@@ -311,9 +313,9 @@ pub struct Renderer {
     drop_env: u16,
     /// Smoothed bands (8.8 fixed point).
     bands: [u16; 4],
-    /// Sparkle state per LED.
-    sparkle: [u16; LEDS_PER_GIFT],
-    sparkle_hue: [u8; LEDS_PER_GIFT],
+    /// Sparkle envelope and colour of the gift.
+    sparkle: u16,
+    sparkle_hue: u8,
     /// Fade-out level when the signal is lost.
     presence: u16,
     rng: u32,
@@ -337,8 +339,8 @@ impl Renderer {
             onset_env: 0,
             drop_env: 0,
             bands: [0; 4],
-            sparkle: [0; LEDS_PER_GIFT],
-            sparkle_hue: [0; LEDS_PER_GIFT],
+            sparkle: 0,
+            sparkle_hue: 0,
             presence: 0,
             rng: seed | 1,
             prev: MusicFrame::default(),
@@ -391,9 +393,12 @@ impl Renderer {
         }
         if f.flags & music_flags::ONSET != 0 {
             self.onset_env = 65535;
-            let i = (self.next_rand() % LEDS_PER_GIFT as u32) as usize;
-            self.sparkle[i] = 65535;
-            self.sparkle_hue[i] = self.next_rand() as u8;
+            // Each gift sparkles on about half the onsets (own random
+            // stream), so the row twinkles instead of flashing in unison.
+            if self.next_rand() & 1 == 0 {
+                self.sparkle = 65535;
+                self.sparkle_hue = self.next_rand() as u8;
+            }
         }
         if f.flags & music_flags::DROP != 0 {
             self.drop_env = 65535;
@@ -503,211 +508,210 @@ impl Renderer {
         let p = t.wrapping_mul(1 + speed as u32 * speed as u32 / 128);
         let phase8 = (p >> 8) as u8;
         let frac16 = p & 0xFFFF;
-        // The virtual strip: every gift's LEDs in slot order, 8.8 positions.
-        let strip = slots * LEDS_PER_GIFT as u32 * 256;
         let hue = f.hue;
         let first = palette(pal, hue);
         let second = palette(pal, hue.wrapping_add(128));
-        // Head of the lapping effects (Comet, Colour wipe), 8.8 LEDs.
-        let lap = ((frac16 * (strip >> 8)) >> 8) as i32;
+        // The four LEDs of a gift always show one colour (they blend in the
+        // frosted box anyway); patterns move across the gifts. Positions
+        // along the row are 8.8 fixed point in gifts.
+        let row = slots * 256;
+        let x = (slot_idx * 256) as i32;
+        // Head of the lapping effects (Comet, Colour wipe).
+        let lap = ((frac16 * slots) >> 8) as i32;
 
-        for (i, px) in out.iter_mut().enumerate() {
-            let led_pos = (i as u8) * 64;
-            let g = slot_idx * LEDS_PER_GIFT as u32 + i as u32;
-            *px = match f.effect {
-                effect::SOLID => first,
-                effect::PULSE => {
-                    let base = scale8(
-                        palette(pal, hue.wrapping_add(slot_pos / 4)),
-                        40 + (self.bands[0] >> 8) as u8 / 2,
-                    );
-                    let flash = palette(pal, hue.wrapping_add(96));
-                    add(base, scale8(flash, beat8))
-                }
-                effect::SPECTRUM => {
-                    let v = (self.bands[i] >> 8) as u8;
-                    scale8(palette(pal, led_pos.wrapping_add(hue)), qadd8(v, beat8 / 4))
-                }
-                effect::CHASE => {
-                    // A bright head travels across all slots once per beat.
-                    let head = f.beat_phase;
-                    let pos = slot_pos.wrapping_add((i as u8) * (64 / slots as u8).max(1));
-                    let d = head.wrapping_sub(pos);
-                    let tail = 255u8.saturating_sub(d.saturating_mul(3));
-                    let c = palette(pal, hue.wrapping_add(pos));
-                    add(scale8(c, tail), scale8(c, 20 + (self.bands[0] >> 9) as u8))
-                }
-                effect::STROBE => {
-                    let v = qadd8(beat8, (self.onset_env >> 8) as u8 / 2);
-                    let white = Rgb::new(255, 240, 220);
-                    scale8(
-                        blend(white, palette(pal, hue), (self.drop_env >> 8) as u8),
-                        v,
+        let px = match f.effect {
+            effect::SOLID => first,
+            effect::PULSE => {
+                let base = scale8(
+                    palette(pal, hue.wrapping_add(slot_pos / 4)),
+                    40 + (self.bands[0] >> 8) as u8 / 2,
+                );
+                let flash = palette(pal, hue.wrapping_add(96));
+                add(base, scale8(flash, beat8))
+            }
+            effect::SPECTRUM => {
+                // An equaliser across the row: bass at one end, treble at
+                // the other (a lone gift shows the loudest band).
+                let v = if slots < 3 {
+                    self.bands.iter().map(|b| (b >> 8) as u8).max().unwrap_or(0)
+                } else {
+                    let pos = slot_idx * 3 * 256 / (slots - 1);
+                    let (k, frac) = ((pos >> 8) as usize, (pos & 255) as u8);
+                    let a = (self.bands[k.min(3)] >> 8) as u8;
+                    let b = (self.bands[(k + 1).min(3)] >> 8) as u8;
+                    blend8(a, b, frac)
+                };
+                scale8(palette(pal, hue.wrapping_add(slot_pos / 2)), qadd8(v, beat8 / 4))
+            }
+            effect::CHASE => {
+                // A bright head travels across all slots once per beat.
+                let d = f.beat_phase.wrapping_sub(slot_pos);
+                let tail = 255u8.saturating_sub(d.saturating_mul(3));
+                let c = palette(pal, hue.wrapping_add(slot_pos));
+                add(scale8(c, tail), scale8(c, 20 + (self.bands[0] >> 9) as u8))
+            }
+            effect::STROBE => {
+                let v = qadd8(beat8, (self.onset_env >> 8) as u8 / 2);
+                let white = Rgb::new(255, 240, 220);
+                scale8(
+                    blend(white, palette(pal, hue), (self.drop_env >> 8) as u8),
+                    v,
+                )
+            }
+            effect::RAINBOW => {
+                let drift = if f.param[0] == 0 {
+                    (t / 12) as u8
+                } else {
+                    phase8
+                };
+                let h = hue.wrapping_add(drift).wrapping_add(slot_pos);
+                scale8(hsv(h, 240, 255), qadd8(60, qadd8(f.level / 2, beat8 / 2)))
+            }
+            effect::SPARKLE => {
+                let s = (self.sparkle >> 8) as u8;
+                let bg = scale8(palette(pal, hue.wrapping_add(slot_pos)), 25);
+                add(bg, scale8(palette(pal, self.sparkle_hue), s))
+            }
+            effect::BREATHE => {
+                // Slow sine on the gift, phase-shifted per slot.
+                let base = if f.param[0] == 0 {
+                    (t / 16) as u8
+                } else {
+                    phase8
+                };
+                let ph = base.wrapping_add(slot_pos / 2);
+                let (floor, depth) = if f.param[1] == 0 {
+                    (30, 200)
+                } else {
+                    (
+                        230 - scale8u(230, f.param[1]),
+                        scale8u(225, f.param[1]) + 25,
                     )
+                };
+                scale8(first, floor + scale8u(sin8(ph), depth))
+            }
+            effect::FADE => palette(
+                pal,
+                hue.wrapping_add(phase8)
+                    .wrapping_add(scale8u(slot_pos, size)),
+            ),
+            effect::WATERFALL => {
+                // A wave flowing across the gifts (about 1.5–8 gifts long).
+                let w = phase8.wrapping_sub((slot_idx * (8 + size as u32)) as u8);
+                let s = sin8(w);
+                scale8(
+                    palette(pal, hue.wrapping_add(w)),
+                    60 + scale8u(scale8u(s, s), 195),
+                )
+            }
+            effect::SCANNER => {
+                let up = frac16 < 0x8000;
+                let tri = if up { frac16 } else { 0xFFFF - frac16 };
+                let span = row.saturating_sub(256).max(1);
+                let head = ((tri * span) >> 15) as i32;
+                let rel = if up { head - x } else { x - head };
+                let v = tail(rel, 192 + size as i32 * 4);
+                scale8(first, qadd8(v, scale8u(v, beat8 / 2)))
+            }
+            effect::BLINK => {
+                let odd = size >= 128 && slot_idx & 1 == 1;
+                if ((p >> 15) & 1 == 1) != odd {
+                    Rgb::BLACK
+                } else if odd {
+                    second
+                } else {
+                    first
                 }
-                effect::RAINBOW => {
-                    let drift = if f.param[0] == 0 {
-                        (t / 12) as u8
+            }
+            effect::TWINKLE => {
+                // Each gift runs its own staggered cycle; a hash of
+                // (cycle, gift) decides whether it twinkles in it.
+                let q = p.wrapping_add(hash(slot_idx ^ 0xA5A5_0000));
+                let h = hash((q >> 16).wrapping_mul(0x9E37_79B1) ^ slot_idx);
+                let density = qadd8(size, (self.onset_env >> 9) as u8);
+                let bg = scale8(palette(pal, hue.wrapping_add(slot_pos)), 14);
+                if (h as u8) < density {
+                    let fr = (q >> 8) as u8;
+                    let env = if fr < 32 {
+                        fr * 8
                     } else {
-                        phase8
+                        (((255 - fr as u32) * 292) >> 8) as u8
                     };
-                    let h = hue
-                        .wrapping_add(drift)
-                        .wrapping_add(slot_pos)
-                        .wrapping_add(led_pos / 2);
-                    scale8(hsv(h, 240, 255), qadd8(60, qadd8(f.level / 2, beat8 / 2)))
-                }
-                effect::SPARKLE => {
-                    let s = (self.sparkle[i] >> 8) as u8;
-                    let bg = scale8(palette(pal, hue.wrapping_add(slot_pos)), 25);
-                    add(bg, scale8(palette(pal, self.sparkle_hue[i]), s))
-                }
-                effect::BREATHE => {
-                    // Slow sine on the gift, phase-shifted per slot.
-                    let base = if f.param[0] == 0 {
-                        (t / 16) as u8
-                    } else {
-                        phase8
-                    };
-                    let ph = base.wrapping_add(slot_pos / 2);
-                    let (floor, depth) = if f.param[1] == 0 {
-                        (30, 200)
-                    } else {
-                        (
-                            230 - scale8u(230, f.param[1]),
-                            scale8u(225, f.param[1]) + 25,
-                        )
-                    };
-                    scale8(
-                        palette(pal, hue.wrapping_add(led_pos / 4)),
-                        floor + scale8u(sin8(ph), depth),
+                    add(
+                        bg,
+                        scale8(
+                            palette(pal, hue.wrapping_add((h >> 8) as u8)),
+                            scale8u(env, env),
+                        ),
                     )
+                } else {
+                    bg
                 }
-                effect::FADE => palette(
+            }
+            effect::COMET => {
+                let mut rel = lap - x;
+                if rel < -256 {
+                    rel += row as i32;
+                }
+                let v = tail(rel, 192 + size as i32 * 6);
+                scale8(
+                    palette(pal, hue.wrapping_add((p >> 12) as u8)),
+                    qadd8(v, scale8u(v, beat8 / 2)),
+                )
+            }
+            effect::THEATER => {
+                let spacing = 2 + size as u32 / 64;
+                if slot_idx % spacing == (p >> 13) % spacing {
+                    palette(pal, hue.wrapping_add((slot_idx * 16) as u8))
+                } else {
+                    scale8(second, 10)
+                }
+            }
+            effect::FIRE => {
+                // (2 × octave 1 + octave 2) / 3
+                let n = ((noise(slot_idx, p) as u32 * 2
+                    + noise(slot_idx ^ 0x55, p.wrapping_mul(3)) as u32)
+                    * 85)
+                    >> 8;
+                let heat = qadd8(255 - scale8u(255 - n as u8, size), f.level / 4);
+                let c = palette(pal, if custom { heat / 2 } else { scale8u(heat, 191) });
+                scale8(c, 60 + scale8u(heat, 195))
+            }
+            effect::POLICE => {
+                let side = slot_idx & 1;
+                let on = (p >> 15) & 1 == side && (size >= 128 || matches!((p >> 12) & 7, 0 | 2));
+                match (on, side) {
+                    (false, _) => Rgb::BLACK,
+                    (true, 0) => first,
+                    _ => second,
+                }
+            }
+            effect::STROBE_TIMED => {
+                if phase8 < 8 + size / 2 {
+                    first
+                } else {
+                    Rgb::BLACK
+                }
+            }
+            effect::PULSE_TIMED => {
+                let e = 255 - phase8;
+                let floor = size / 2;
+                scale8(first, floor + scale8u(scale8u(e, e), 255 - floor))
+            }
+            effect::WIPE => {
+                let cycle = (p >> 16) as u8;
+                let step = if custom { 128 } else { 64 };
+                let new = palette(pal, hue.wrapping_add(cycle.wrapping_mul(step)));
+                let old = palette(
                     pal,
-                    hue.wrapping_add(phase8)
-                        .wrapping_add(scale8u(slot_pos, size)),
-                ),
-                effect::WATERFALL => {
-                    let w = phase8.wrapping_sub((g * (2 + size as u32 / 4)) as u8);
-                    let s = sin8(w);
-                    scale8(
-                        palette(pal, hue.wrapping_add(w)),
-                        60 + scale8u(scale8u(s, s), 195),
-                    )
-                }
-                effect::SCANNER => {
-                    let up = frac16 < 0x8000;
-                    let tri = if up { frac16 } else { 0xFFFF - frac16 };
-                    let span = strip - 256;
-                    let head = ((tri * span) >> 15) as i32;
-                    let x = (g * 256) as i32;
-                    let rel = if up { head - x } else { x - head };
-                    let v = tail(rel, 256 + size as i32 * 16);
-                    scale8(first, qadd8(v, scale8u(v, beat8 / 2)))
-                }
-                effect::BLINK => {
-                    let odd = size >= 128 && slot_idx & 1 == 1;
-                    if ((p >> 15) & 1 == 1) != odd {
-                        Rgb::BLACK
-                    } else if odd {
-                        second
-                    } else {
-                        first
-                    }
-                }
-                effect::TWINKLE => {
-                    // Each LED runs its own staggered cycle; a hash of
-                    // (cycle, LED) decides whether it twinkles in it.
-                    let q = p.wrapping_add(hash(g ^ 0xA5A5_0000));
-                    let h = hash((q >> 16).wrapping_mul(0x9E37_79B1) ^ g);
-                    let density = qadd8(size, (self.onset_env >> 9) as u8);
-                    let bg = scale8(palette(pal, hue.wrapping_add(slot_pos)), 14);
-                    if (h as u8) < density {
-                        let fr = (q >> 8) as u8;
-                        let env = if fr < 32 {
-                            fr * 8
-                        } else {
-                            (((255 - fr as u32) * 292) >> 8) as u8
-                        };
-                        add(
-                            bg,
-                            scale8(
-                                palette(pal, hue.wrapping_add((h >> 8) as u8)),
-                                scale8u(env, env),
-                            ),
-                        )
-                    } else {
-                        bg
-                    }
-                }
-                effect::COMET => {
-                    let mut rel = lap - (g * 256) as i32;
-                    if rel < -256 {
-                        rel += strip as i32;
-                    }
-                    let v = tail(rel, 256 + size as i32 * 24);
-                    scale8(
-                        palette(pal, hue.wrapping_add((p >> 12) as u8)),
-                        qadd8(v, scale8u(v, beat8 / 2)),
-                    )
-                }
-                effect::THEATER => {
-                    let spacing = 2 + size as u32 / 64;
-                    if g % spacing == (p >> 13) % spacing {
-                        palette(pal, hue.wrapping_add((g * 4) as u8))
-                    } else {
-                        scale8(second, 10)
-                    }
-                }
-                effect::FIRE => {
-                    // (2 × octave 1 + octave 2) / 3
-                    let n = ((noise(g, p) as u32 * 2 + noise(g ^ 0x55, p.wrapping_mul(3)) as u32)
-                        * 85)
-                        >> 8;
-                    let heat = qadd8(255 - scale8u(255 - n as u8, size), f.level / 4);
-                    let c = palette(pal, if custom { heat / 2 } else { scale8u(heat, 191) });
-                    scale8(c, 60 + scale8u(heat, 195))
-                }
-                effect::POLICE => {
-                    let side = (slot_idx + i as u32 / 2) & 1;
-                    let on =
-                        (p >> 15) & 1 == side && (size >= 128 || matches!((p >> 12) & 7, 0 | 2));
-                    match (on, side) {
-                        (false, _) => Rgb::BLACK,
-                        (true, 0) => first,
-                        _ => second,
-                    }
-                }
-                effect::STROBE_TIMED => {
-                    if phase8 < 8 + size / 2 {
-                        first
-                    } else {
-                        Rgb::BLACK
-                    }
-                }
-                effect::PULSE_TIMED => {
-                    let e = 255 - phase8;
-                    let floor = size / 2;
-                    scale8(
-                        palette(pal, hue.wrapping_add(led_pos / 8)),
-                        floor + scale8u(scale8u(e, e), 255 - floor),
-                    )
-                }
-                effect::WIPE => {
-                    let cycle = (p >> 16) as u8;
-                    let step = if custom { 128 } else { 64 };
-                    let new = palette(pal, hue.wrapping_add(cycle.wrapping_mul(step)));
-                    let old = palette(
-                        pal,
-                        hue.wrapping_add(cycle.wrapping_sub(1).wrapping_mul(step)),
-                    );
-                    let x = (lap - (g * 256) as i32).clamp(0, 255);
-                    blend(old, new, x as u8)
-                }
-                _ => Rgb::BLACK,
-            };
-        }
+                    hue.wrapping_add(cycle.wrapping_sub(1).wrapping_mul(step)),
+                );
+                let k = (lap - x).clamp(0, 255);
+                blend(old, new, k as u8)
+            }
+            _ => Rgb::BLACK,
+        };
+        *out = [px; LEDS_PER_GIFT];
 
         for px in out.iter_mut() {
             *px = scale8(*px, f.brightness);
@@ -719,9 +723,7 @@ impl Renderer {
         self.beat_env = (self.beat_env as u32).saturating_sub(dt * 364) as u16;
         self.onset_env = (self.onset_env as u32).saturating_sub(dt * 546) as u16;
         self.drop_env = (self.drop_env as u32).saturating_sub(dt * 44) as u16;
-        for s in &mut self.sparkle {
-            *s = (*s as u32).saturating_sub(dt * 164) as u16;
-        }
+        self.sparkle = (self.sparkle as u32).saturating_sub(dt * 164) as u16;
     }
 
     fn next_rand(&mut self) -> u32 {
@@ -752,7 +754,7 @@ fn look_changed(a: &MusicFrame, b: &MusicFrame) -> bool {
         || a.colors != b.colors
 }
 
-/// Brightness of an LED `rel` (8.8 LEDs) behind a moving head: an
+/// Brightness of a gift `rel` (8.8 gifts) behind a moving head: an
 /// antialiased front edge, then a tail fading out over `len`.
 fn tail(rel: i32, len: i32) -> u8 {
     let v = if rel < -256 || rel >= len {
@@ -849,6 +851,11 @@ pub fn qadd8(a: u8, b: u8) -> u8 {
     a.saturating_add(b)
 }
 
+/// Linear blend of two levels: 0 = a, 255 = b.
+fn blend8(a: u8, b: u8, t: u8) -> u8 {
+    ((a as u16 * (255 - t as u16) + b as u16 * t as u16) / 255) as u8
+}
+
 fn avg(a: u8, b: u8) -> u8 {
     ((a as u16 + b as u16) / 2) as u8
 }
@@ -913,6 +920,34 @@ static GAMMA: [u8; 256] = {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn every_effect_lights_a_gift_in_one_colour() {
+        for e in 0..effect::ALL {
+            for slot in 0..10u8 {
+                let mut r = Renderer::new(slot as u32 + 3);
+                let mut f = MusicFrame {
+                    effect: e,
+                    brightness: 255,
+                    slot_count: 10,
+                    bass: 200,
+                    mid: 120,
+                    treble: 60,
+                    level: 150,
+                    bpm: 120,
+                    ..Default::default()
+                };
+                for k in 0..300u32 {
+                    f.beat_phase = (k * 7) as u8;
+                    f.flags = if k % 25 == 0 { music_flags::BEAT | music_flags::ONSET } else { 0 };
+                    r.on_frame(&f, k * 10);
+                    let mut out = [Rgb::BLACK; LEDS_PER_GIFT];
+                    r.render(k * 10, slot, &mut out);
+                    assert!(out.iter().all(|c| *c == out[0]), "effect {e} slot {slot} t {k}: {out:?}");
+                }
+            }
+        }
+    }
 
     fn lit(out: &[Rgb; 4]) -> bool {
         out.iter().any(|c| *c != Rgb::BLACK)

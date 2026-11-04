@@ -45,7 +45,13 @@
 //!   `slow + depth · (fast - slow)`. Quiet phrases stay quiet, loud ones
 //!   loud, but jitter within a phrase is scaled by `depth` (lower for legato
 //!   music). Effects that do not follow loudness themselves (Solid, Breathe,
-//!   Sparkle) get their brightness modulated by the phrase envelope instead.
+//!   Fade, Wipe, …; see [`follows_loudness`]) get their brightness modulated
+//!   by the phrase envelope instead, plus a short swell on every flagged
+//!   onset (so each note is visible) and the fast loudness envelope.
+//! * **Note colour:** the provider's dominant pitch class moves the hue by
+//!   `note_color · 256/12` per semitone. The engine keeps an unwrapped note
+//!   that glides (shortest way round) to each clearly pitched note and holds
+//!   it through drums and silence, so colour motion is always continuous.
 
 use std::sync::Arc;
 
@@ -75,6 +81,21 @@ const DYN_STEP: f64 = 0.01;
 const DYN_WARMUP: i64 = 300;
 /// Time constant of the slow phrase envelope, seconds.
 const PHRASE_TAU: f32 = 1.5;
+/// Tone clarity at or above which a frame's pitch class moves the colour at
+/// all. Below [`NOTE_CLEAR`] it moves it slowly (see `note_glide`).
+pub const NOTE_MIN_CLARITY: f32 = 0.1;
+/// Tone clarity of a clean note (a solo instrument or a lead line): the
+/// colour follows it at full speed and legato note changes swell.
+pub const NOTE_CLEAR: f32 = crate::analysis::dsp::TONE_CLEAN;
+/// Peak of a note swell for the weakest / strongest flagged onset.
+const SWELL_PEAK: (f32, f32) = (0.6, 1.0);
+/// A new note (pitch class) must hold this many grid steps (40 ms) before it
+/// swells, so vibrato and slides through neighbouring notes do not.
+const NOTE_HOLD_STEPS: u8 = 4;
+/// Minimum time between two note swells, seconds.
+const NOTE_SWELL_GAP: f64 = 0.12;
+/// Swell strength of a note change without an onset (legato).
+const NOTE_SWELL_STRENGTH: f32 = 0.5;
 
 /// Envelope state of the four continuous features (bass, mid, treble, level).
 /// The engine keeps one for [`ShowEngine::frame_at`]; previews that need a
@@ -89,6 +110,15 @@ pub struct EngineCursor {
     slow: [f32; 4],
     /// Previous `t` for event edge detection.
     last_t: Option<f64>,
+    /// Current note, unwrapped semitones (pitch class + 12·k), once a
+    /// pitched frame was seen.
+    note: Option<f32>,
+    /// Note swell: value at the last onset, its peak, and the onset time.
+    swell: (f32, f32, f64),
+    /// Stable note (rounded pitch class) and a candidate with the steps it
+    /// has held, for swells on legato note changes.
+    held: Option<i32>,
+    candidate: (i32, u8),
 }
 
 impl EngineCursor {
@@ -99,6 +129,33 @@ impl EngineCursor {
     /// Forget the time line (next frame starts fresh).
     pub fn reset(&mut self) {
         *self = Self::default();
+    }
+
+    /// Pitch class (0.0..12.0, C = 0) the colour follows at the last frame,
+    /// if any pitched audio has been heard on this time line.
+    pub fn note(&self) -> Option<f32> {
+        self.note.map(|n| n.rem_euclid(12.0))
+    }
+
+    /// Note swell (0..=1) at `t`: rises over a few tens of ms after an
+    /// onset, then decays.
+    fn swell_at(&self, t: f64, smoothing: f32) -> f32 {
+        let (v0, peak, t0) = self.swell;
+        if peak <= 0.0 {
+            return 0.0;
+        }
+        let s = smoothing.clamp(0.0, 1.0);
+        let (tau_a, tau_d) = (0.015 + 0.03 * s, 0.22 + 0.36 * s);
+        // A grid-step trigger may sit a rounding error after `t`.
+        let dt = (t - t0).max(0.0) as f32;
+        (v0 + (peak - v0) * (1.0 - (-dt / tau_a).exp())) * (-dt / tau_d).exp()
+    }
+
+    /// Start a note swell at `t` (from wherever the previous one is now).
+    fn trigger_swell(&mut self, t: f64, strength: f32, smoothing: f32) {
+        let v0 = self.swell_at(t, smoothing);
+        let peak = SWELL_PEAK.0 + (SWELL_PEAK.1 - SWELL_PEAK.0) * strength.clamp(0.0, 1.0);
+        self.swell = (v0, peak.max(v0), t);
     }
 
     /// The event window `(t0, t]` for a frame at `t`, updating the edge state.
@@ -118,15 +175,57 @@ impl EngineCursor {
             Some(k) if k <= target && target - k <= DYN_WARMUP => k,
             _ => {
                 let k0 = target - DYN_WARMUP;
-                let x = bands(&p.features_at(k0 as f64 * DYN_STEP));
+                let feat = p.features_at(k0 as f64 * DYN_STEP);
+                let x = bands(&feat);
                 self.fast = x;
                 self.slow = x;
+                self.note = feat
+                    .pitch_class()
+                    .filter(|_| feat.tone_clarity() >= NOTE_MIN_CLARITY);
+                self.held = None;
                 k0
             }
         };
+        let glide_tau = 0.02 + 0.1 * s.smoothing.clamp(0.0, 1.0);
         for k in start + 1..=target {
             let tk = k as f64 * DYN_STEP;
-            let x = bands(&p.features_at(tk));
+            let feat = p.features_at(tk);
+            let clarity = feat.tone_clarity();
+            if clarity >= NOTE_MIN_CLARITY
+                && let Some(pc) = feat.pitch_class()
+            {
+                // Legato note changes of clean notes swell like onsets once
+                // the note holds.
+                let r = (pc.round() as i32).rem_euclid(12);
+                if clarity < NOTE_CLEAR {
+                    self.candidate = (r, 0);
+                } else if self.held != Some(r) {
+                    self.candidate = if self.candidate.0 == r {
+                        (r, self.candidate.1.saturating_add(1))
+                    } else {
+                        (r, 1)
+                    };
+                    if self.candidate.1 >= NOTE_HOLD_STEPS {
+                        let first = self.held.is_none();
+                        self.held = Some(r);
+                        if !first && tk - self.swell.2 >= NOTE_SWELL_GAP {
+                            self.trigger_swell(tk, NOTE_SWELL_STRENGTH, s.smoothing);
+                        }
+                    }
+                } else {
+                    self.candidate = (r, 0);
+                }
+                self.note = Some(match self.note {
+                    None => pc,
+                    Some(n) => {
+                        // Shortest way round the pitch circle; vaguer notes
+                        // (a band's harmony) pull more slowly.
+                        let d = (pc - n + 6.0).rem_euclid(12.0) - 6.0;
+                        n + d * note_glide(glide_tau, clarity)
+                    }
+                });
+            }
+            let x = bands(&feat);
             let c = p.rhythm_confidence_at(tk).unwrap_or(1.0);
             let (att, rel) = envelope_coeffs(s.smoothing, c);
             let slow_a = 1.0 - (-(DYN_STEP as f32) / PHRASE_TAU).exp();
@@ -138,6 +237,34 @@ impl EngineCursor {
         }
         self.step = Some(target);
     }
+}
+
+/// Per-step glide of the note towards a frame's pitch class: time constant
+/// `tau` for clean notes, `× (NOTE_CLEAR / clarity)²` below (0.07 s → ~0.3 s
+/// at clarity 0.2, ~0.9 s at 0.12 with the default smoothing).
+fn note_glide(tau: f32, clarity: f32) -> f32 {
+    let r = (NOTE_CLEAR / clarity.max(1e-3)).max(1.0);
+    1.0 - (-(DYN_STEP as f32) / (tau * r * r)).exp()
+}
+
+/// True for effects that read loudness or bands themselves. The others get
+/// the engine's loudness and note modulation through their brightness.
+pub fn follows_loudness(e: u8) -> bool {
+    matches!(
+        e,
+        effect::PULSE
+            | effect::SPECTRUM
+            | effect::CHASE
+            | effect::STROBE
+            | effect::RAINBOW
+            | effect::FIRE
+    )
+}
+
+/// Effects that already show each onset (sparkles, twinkles), so they get
+/// no extra note swell.
+fn shows_onsets(e: u8) -> bool {
+    matches!(e, effect::SPARKLE | effect::TWINKLE)
 }
 
 fn bands(f: &FeatureFrame) -> [f32; 4] {
@@ -259,11 +386,16 @@ impl ShowEngine {
         self.compute(t0, t, slot_count, cursor)
     }
 
+    /// Pitch class the colour follows on the engine's own time line.
+    pub fn note(&self) -> Option<f32> {
+        self.cursor.note()
+    }
+
     /// Stateless variant for previews / scrubbing: events in `(t - 10 ms, t]`.
     pub fn peek_frame(&self, t: f64, slot_count: u8) -> MusicFrame {
         let mut cursor = EngineCursor::default();
         cursor.advance(&*self.provider, &self.show.settings, t);
-        self.compute(t - FRAME_PERIOD, t, slot_count, &cursor)
+        self.compute(t - FRAME_PERIOD, t, slot_count, &mut cursor)
     }
 
     /// `frame` with the per-slot overrides of the cue active at `t` applied
@@ -298,7 +430,7 @@ impl ShowEngine {
             .is_some_and(|c| !c.slot_overrides.is_empty())
     }
 
-    fn compute(&self, t0: f64, t: f64, slot_count: u8, dynamics: &EngineCursor) -> MusicFrame {
+    fn compute(&self, t0: f64, t: f64, slot_count: u8, dynamics: &mut EngineCursor) -> MusicFrame {
         let p = &*self.provider;
         let s = &self.show.settings;
         let feat = p.features_at(t);
@@ -342,11 +474,13 @@ impl ShowEngine {
         if s.beat_flags && beat_sync {
             f.flags |= ev & (music_flags::BEAT | music_flags::DOWNBEAT);
         }
-        if s.onset_flags
-            && ev & music_flags::ONSET != 0
-            && onset_strength >= 1.0 - s.sensitivity.clamp(0.0, 1.0) - 1e-6
-        {
+        let onset = ev & music_flags::ONSET != 0
+            && onset_strength >= 1.0 - s.sensitivity.clamp(0.0, 1.0) - 1e-6;
+        if onset && s.onset_flags {
             f.flags |= music_flags::ONSET;
+        }
+        if onset {
+            dynamics.trigger_swell(t, onset_strength, s.smoothing);
         }
         if s.drop_flags {
             f.flags |= ev & music_flags::DROP;
@@ -378,19 +512,30 @@ impl ShowEngine {
                 bright = prev.brightness as f64 + (bright - prev.brightness as f64) * k;
             }
         }
+        if let Some(n) = dynamics.note {
+            hue += s.note_color.clamp(0.0, 1.0) as f64 * n as f64 * 256.0 / 12.0;
+        }
         f.effect = cue.effect;
         f.palette = cue.palette;
         f.hue = hue.rem_euclid(256.0) as u8;
         f.param = cue.params;
         // Effects that ignore loudness follow the phrase dynamics through
-        // their brightness instead (quiet phrases dimmer, never dark).
-        if matches!(
-            cue.effect,
-            effect::SOLID | effect::BREATHE | effect::SPARKLE
-        ) {
-            let amount = 0.8 * s.intensity.clamp(0.0, 1.0);
+        // their brightness instead (quiet phrases dimmer, never dark), and
+        // swell on each note.
+        if !follows_loudness(cue.effect) {
+            let intensity = s.intensity.clamp(0.0, 1.0);
+            let amount = 0.8 * intensity;
             let phrase = dynamics.slow[3].clamp(0.0, 1.0).powf(1.0 / 1.5);
             bright *= (1.0 - amount + amount * phrase) as f64;
+            let k = (1.2 * intensity).min(0.9);
+            let notes = if shows_onsets(cue.effect) {
+                0.0
+            } else {
+                dynamics.swell_at(t, s.smoothing)
+            };
+            // Loud passages sit a little below full so each note still lifts them.
+            let drive = (0.65 * shaped[3] + 0.5 * notes).min(1.0);
+            bright *= (1.0 - k + k * drive) as f64;
         }
         let mut brightness = bright.round().clamp(0.0, 255.0) as u8;
 

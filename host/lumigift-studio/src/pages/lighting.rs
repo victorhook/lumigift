@@ -67,11 +67,11 @@ fn blurb(e: u8) -> &'static str {
         effect::TWINKLE => {
             "Random sparkles over a dim glow, identical in preview and on the gifts."
         }
-        effect::WATERFALL => "Colour flowing down each gift and across the row.",
+        effect::WATERFALL => "A colour wave flowing across the row.",
         effect::SCANNER => "A head with a fading tail bouncing across all gifts in slot order.",
         effect::COMET => "A single comet lapping around all gifts.",
-        effect::THEATER => "Marquee lights: every few LEDs lit, stepping along.",
-        effect::WIPE => "Fills the row LED by LED with the next colour.",
+        effect::THEATER => "Marquee lights: every few gifts lit, stepping along.",
+        effect::WIPE => "Fills the row gift by gift with the next colour.",
         effect::FIRE => "Flickering fire or candle light.",
         effect::BLINK => "On and off. Alternate swaps odd and even gifts.",
         effect::POLICE => "Two colours alternating with double flashes (or smoothly).",
@@ -277,6 +277,13 @@ struct Layer {
     look: Look,
 }
 
+impl Layer {
+    /// An "Off" layer: its gifts are dark (see [`apply_off`]).
+    fn is_off(&self) -> bool {
+        self.look.brightness == 0
+    }
+}
+
 /// Runtime state of the page (not persisted).
 pub struct Lighting {
     /// The Lighting page owns the show stream.
@@ -327,6 +334,7 @@ impl Lighting {
         } else {
             match self.layers.as_slice() {
                 [] => "Lighting".into(),
+                v if v.iter().all(Layer::is_off) => "Lighting · Off".into(),
                 [l] => format!("Lighting · {}", EFFECTS[l.look.effect as usize].name),
                 v => format!("Lighting · {} layers", v.len()),
             }
@@ -396,6 +404,21 @@ pub fn release(app: &mut App) {
 
 /// Apply the edited look to the current target and take over the output.
 pub fn apply(app: &mut App) {
+    let look = app.persist.lighting.look;
+    apply_look(app, look);
+}
+
+/// Turn the current target's lights off (fading with the crossfade time)
+/// until another look is applied to it. The edited look is kept.
+pub fn apply_off(app: &mut App) {
+    let look = Look {
+        brightness: 0,
+        ..app.persist.lighting.look
+    };
+    apply_look(app, look);
+}
+
+fn apply_look(app: &mut App, look: Look) {
     let Some(t) = layer_target(app) else {
         app.toasts.push(
             ToastKind::Warn,
@@ -404,7 +427,6 @@ pub fn apply(app: &mut App) {
         );
         return;
     };
-    let look = app.persist.lighting.look;
     let l = &mut app.lighting;
     match &t {
         // Everyone: one layer.
@@ -621,6 +643,9 @@ fn shortcuts(app: &mut App, ui: &mut Ui) {
     if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F)) {
         toggle_fade_out(app);
     }
+    if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::O)) && app.backend.is_some() {
+        apply_off(app);
+    }
     if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::B)) {
         toggle_blackout(app);
     }
@@ -796,7 +821,7 @@ fn stage(app: &mut App, ui: &mut Ui, rect: Rect) {
             .snap
             .gifts
             .iter()
-            .find(|g| u64::from_le_bytes(g.uid.0[4..12].try_into().unwrap()) == id)
+            .find(|g| crate::pages::stage_page::uid_id(&g.uid) == id)
         {
             let u = g.uid;
             if ui.input(|i| i.modifiers.command) {
@@ -883,13 +908,23 @@ fn library(app: &mut App, ui: &mut Ui) {
     } else {
         app.lighting.epoch.elapsed().as_millis() as u32
     };
-    let active: Option<u8> = current_layer(app).map(|l| l.look.effect);
+    let current = current_layer(app);
+    let off_active = current.is_some_and(Layer::is_off) && app.lighting.armed;
+    let active: Option<u8> = current.filter(|l| !l.is_off()).map(|l| l.look.effect);
     let edited = app.persist.lighting.look;
+    // `None` is the Off card, first in the library.
+    let items: Vec<Option<u8>> = std::iter::once(None).chain(LIBRARY.iter().map(|&e| Some(e))).collect();
     let mut clicked = None;
-    for row in LIBRARY.chunks(cols) {
+    for row in items.chunks(cols) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = gap;
-            for &e in row {
+            for &item in row {
+                let Some(e) = item else {
+                    if off_card(ui, vec2(w, h), off_active).clicked() {
+                        clicked = Some(None);
+                    }
+                    continue;
+                };
                 let look = if e == edited.effect {
                     edited
                 } else {
@@ -898,14 +933,16 @@ fn library(app: &mut App, ui: &mut Ui) {
                 let look = look.limited(app.persist.limit_flashing);
                 let on = active == Some(e) && app.lighting.armed;
                 if effect_card(ui, e, &look, vec2(w, h), now, on, e == edited.effect).clicked() {
-                    clicked = Some(e);
+                    clicked = Some(Some(e));
                 }
             }
         });
         ui.add_space(gap);
     }
-    if let Some(e) = clicked {
-        apply_effect(app, e);
+    match clicked {
+        Some(Some(e)) => apply_effect(app, e),
+        Some(None) => apply_off(app),
+        None => {}
     }
 }
 
@@ -913,6 +950,67 @@ fn library(app: &mut App, ui: &mut Ui) {
 fn current_layer(app: &App) -> Option<&Layer> {
     let t = layer_target(app)?;
     app.lighting.layers.iter().rev().find(|l| l.target == t)
+}
+
+/// The "Off" card: the target's lights fade to black and stay off.
+fn off_card(ui: &mut Ui, size: egui::Vec2, on: bool) -> egui::Response {
+    let (r, resp) = ui.allocate_exact_size(size, Sense::click());
+    if ui.is_rect_visible(r) {
+        let t = ui
+            .ctx()
+            .animate_bool_with_time(resp.id, resp.hovered(), MOTION_FAST);
+        let p = ui.painter();
+        let fill = theme::mix(SURFACE_2, HOVER, t * 0.6);
+        let stroke = if on {
+            theme::alpha(ACCENT, 0.9)
+        } else {
+            theme::mix(BORDER_SUBTLE, BORDER_STRONG, t)
+        };
+        if on {
+            p.rect_filled(
+                r.expand(3.0),
+                CornerRadius::same(R_MD + 3),
+                theme::alpha(ACCENT, 0.16),
+            );
+        }
+        p.rect_filled(r, CornerRadius::same(R_MD), fill);
+        p.rect_stroke(
+            r,
+            CornerRadius::same(R_MD),
+            Stroke::new(if on { 1.5 } else { 1.0 }, stroke),
+            StrokeKind::Inside,
+        );
+        widgets::top_highlight(p, r, R_MD as f32);
+        let well = Rect::from_min_size(r.min + vec2(8.0, 8.0), vec2(r.width() - 16.0, 58.0));
+        p.rect_filled(well, CornerRadius::same(R_SM), BG_SUNKEN);
+        paint_row(
+            &p.with_clip_rect(well.shrink(1.0)),
+            well,
+            &[[Rgb::BLACK; LEDS_PER_GIFT]; 8],
+        );
+        let y = well.bottom() + (r.bottom() - well.bottom()) / 2.0;
+        widgets::paint_icon(
+            p,
+            pos2(r.left() + 18.0, y),
+            icons::POWER,
+            16.0,
+            if on { ACCENT_TEXT } else { theme::mix(TEXT_MUTED, TEXT, t) },
+        );
+        p.text(
+            pos2(r.left() + 32.0, y),
+            Align2::LEFT_CENTER,
+            "Off",
+            theme::font("label"),
+            if on { TEXT } else { TEXT_SECONDARY },
+        );
+    }
+    resp.on_hover_ui(|ui| {
+        widgets::tooltip_with_keys(
+            ui,
+            "Turn the target's lights off (fades with the crossfade time) until you apply a look again",
+            Some("O"),
+        )
+    })
 }
 
 fn effect_card(
@@ -1163,12 +1261,12 @@ fn output_section(app: &mut App, ui: &mut Ui) {
                     vec2(4.0, r.height() - 12.0),
                 ),
                 &layer.look.stops(),
-                if armed { 1.0 } else { 0.5 },
+                if layer.is_off() { 0.15 } else if armed { 1.0 } else { 0.5 },
             );
             widgets::paint_icon(
                 p,
                 pos2(r.left() + 26.0, r.center().y),
-                icons::EFFECT[layer.look.effect as usize],
+                if layer.is_off() { icons::POWER } else { icons::EFFECT[layer.look.effect as usize] },
                 14.0,
                 TEXT_MUTED,
             );
@@ -1182,7 +1280,7 @@ fn output_section(app: &mut App, ui: &mut Ui) {
             p.text(
                 pos2(r.left() + 40.0, r.center().y + 7.0),
                 Align2::LEFT_CENTER,
-                layer.look.label(),
+                if layer.is_off() { "Off".to_string() } else { layer.look.label() },
                 theme::font("small"),
                 TEXT_MUTED,
             );
@@ -1212,7 +1310,10 @@ fn output_section(app: &mut App, ui: &mut Ui) {
                     }
                     LayerTarget::Group(n) => TargetSel::Group(n.clone()),
                 };
-                app.persist.lighting.look = layer.look;
+                // An Off layer keeps the edited look (not its brightness 0).
+                if !layer.is_off() {
+                    app.persist.lighting.look = layer.look;
+                }
             }
             ui.add_space(4.0);
         }

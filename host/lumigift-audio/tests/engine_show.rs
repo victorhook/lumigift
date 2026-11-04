@@ -113,6 +113,8 @@ fn cue_state_hue_drift_fade_and_one_shots() {
         ..Default::default()
     };
     show.settings.master_brightness = 255;
+    // Exact cue hues: keep the notes out of it.
+    show.settings.note_color = 0.0;
     show.insert_cue(Cue {
         time: 0.0,
         effect: effect::PULSE,
@@ -382,5 +384,146 @@ fn auto_generated_show_is_sensible() {
     while t < a.duration {
         e.frame_at(t, 10);
         t += 0.01;
+    }
+}
+
+/// A melody of harmonic tones: `(MIDI note, seconds)`, 20 ms fades.
+fn melody(notes: &[(f32, f32)], sr: u32) -> Vec<f32> {
+    let mut out = Vec::new();
+    for &(midi, secs) in notes {
+        let f0 = 440.0 * 2f32.powf((midi - 69.0) / 12.0);
+        let n = (secs * sr as f32) as usize;
+        let fade = (0.02 * sr as f32) as usize;
+        for i in 0..n {
+            let t = i as f32 / sr as f32;
+            let env = (i.min(n - 1 - i) as f32 / fade as f32).min(1.0);
+            let v: f32 = (1..=8)
+                .map(|h| (std::f32::consts::TAU * f0 * h as f32 * t).sin() / h as f32)
+                .sum();
+            out.push(0.2 * env * v);
+        }
+    }
+    out
+}
+
+fn solid_show(note_color: f32) -> Show {
+    let mut show = Show {
+        cues: vec![],
+        ..Default::default()
+    };
+    show.settings.note_color = note_color;
+    show.insert_cue(Cue {
+        time: 0.0,
+        effect: effect::SOLID,
+        palette: palette::OCEAN,
+        brightness: 200,
+        hue: 0,
+        ..Default::default()
+    });
+    show
+}
+
+#[test]
+fn note_colour_follows_the_melody() {
+    let sr = 44_100;
+    // C4 E4 G4 B4 D5 A3, one second each.
+    let notes = [(60.0, 1.0), (64.0, 1.0), (67.0, 1.0), (71.0, 1.0), (74.0, 1.0), (57.0, 1.0)];
+    let a = Arc::new(Analysis::analyze(&melody(&notes, sr), sr));
+
+    // Full note colour: each pitch class has its own hue (C = 0).
+    let mut e = ShowEngine::new(a.clone(), solid_show(1.0));
+    let mut t = 0.0;
+    let mut hues = vec![];
+    while t < 6.0 {
+        let f = e.frame_at(t, 10);
+        if (t.fract() - 0.7).abs() < 0.005 {
+            hues.push(f.hue);
+        }
+        t += 0.01;
+    }
+    assert_eq!(hues.len(), notes.len());
+    for (&(midi, _), &h) in notes.iter().zip(&hues) {
+        let want = (midi.rem_euclid(12.0) * 256.0 / 12.0) as i32;
+        let d = (h as i32 - want).rem_euclid(256).min((want - h as i32).rem_euclid(256));
+        assert!(d <= 6, "MIDI {midi}: hue {h}, want {want}");
+    }
+    assert!((e.note().unwrap() - 9.0).abs() < 0.3, "last note {:?}", e.note());
+
+    // Off: the cue's hue only.
+    let mut e = ShowEngine::new(a.clone(), solid_show(0.0));
+    let mut t = 0.0;
+    while t < 6.0 {
+        assert_eq!(e.frame_at(t, 10).hue, 0);
+        t += 0.01;
+    }
+}
+
+#[test]
+fn each_note_swells_on_effects_that_ignore_loudness() {
+    let sr = 44_100;
+    // Same loudness throughout: only the note changes are events.
+    let notes: Vec<(f32, f32)> = (0..8).map(|i| (60.0 + (i % 4) as f32 * 2.0, 0.75)).collect();
+    let a = Arc::new(Analysis::analyze(&melody(&notes, sr), sr));
+    let mut e = ShowEngine::new(a.clone(), solid_show(0.5));
+    let mut b = vec![];
+    let mut t = 0.0;
+    while t < 6.0 {
+        b.push(e.frame_at(t, 10).brightness as f32);
+        t += 0.01;
+    }
+    // Brightness just after each note start vs. late in the note.
+    let (mut early, mut late) = (0.0, 0.0);
+    for k in 2..8 {
+        let s = (k as f32 * 75.0) as usize;
+        early += b[s + 4..s + 15].iter().copied().fold(0.0, f32::max);
+        late += b[s + 55..s + 70].iter().sum::<f32>() / 15.0;
+    }
+    let (early, late) = (early / 6.0, late / 6.0);
+    assert!(early > late * 1.12, "swell: early {early:.0} vs late {late:.0}");
+}
+
+#[test]
+fn harmony_of_a_band_mix_moves_the_colour_at_chord_changes() {
+    let sr = 44_100;
+    // C, F, G, C major triads (root position, 6 harmonics), 2 s each, over drums.
+    let chords = [[60.0f32, 64.0, 67.0], [65.0, 69.0, 72.0], [67.0, 71.0, 74.0], [60.0, 64.0, 67.0]];
+    let mut x: Vec<f32> = Vec::new();
+    for ch in &chords {
+        let n = 2 * sr as usize;
+        for i in 0..n {
+            let t = i as f32 / sr as f32;
+            let v: f32 = ch
+                .iter()
+                .map(|&m| {
+                    let f0 = 440.0 * 2f32.powf((m - 69.0) / 12.0);
+                    (1..=6)
+                        .map(|h| (std::f32::consts::TAU * f0 * h as f32 * t).sin() / h as f32)
+                        .sum::<f32>()
+                })
+                .sum();
+            x.push(0.08 * v);
+        }
+    }
+    let drums = synth::render(&[synth::Part { bass: false, ..synth::Part::groove(16.0, 120.0, 0.6) }], sr);
+    for (a, d) in x.iter_mut().zip(&drums.samples) {
+        *a += d;
+    }
+    let a = Arc::new(Analysis::analyze(&x, sr));
+    let mut e = ShowEngine::new(a.clone(), solid_show(1.0));
+    let mut hues: Vec<u8> = vec![];
+    let mut t = 0.0;
+    while t < 8.0 {
+        hues.push(e.frame_at(t, 10).hue);
+        t += 0.01;
+    }
+    let circ = |a: u8, b: u8| (a.wrapping_sub(b)).min(b.wrapping_sub(a)) as i32;
+    for (k, ch) in chords.iter().enumerate() {
+        // Second half of each chord: on the root's colour, and steady.
+        let w = &hues[k * 200 + 100..k * 200 + 195];
+        let want = ((ch[0] % 12.0) * 256.0 / 12.0) as u8;
+        let mid = w[w.len() / 2];
+        assert!(circ(mid, want) <= 12, "chord {k}: hue {mid}, root colour {want}");
+        let spread = w.iter().map(|&h| circ(h, mid)).max().unwrap();
+        assert!(spread <= 10, "chord {k}: hue wobbles by {spread}");
     }
 }

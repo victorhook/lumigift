@@ -1170,6 +1170,7 @@ impl App {
             }
             A::LightingPreset(i) => crate::pages::lighting::apply_preset(self, i),
             A::LightingFadeOut => crate::pages::lighting::toggle_fade_out(self),
+            A::LightingOff => crate::pages::lighting::apply_off(self),
             A::LightingRelease => crate::pages::lighting::release(self),
             A::SearchLog(q) => {
                 self.fleet.log_query = q;
