@@ -70,6 +70,13 @@ pub(crate) enum RadioReq {
         radio: RadioSettings,
         reply: Sender<Result<(), LinkError>>,
     },
+    /// One `TxRepeat`: `payload` broadcast back to back for `duration`,
+    /// timed by the bridge.
+    Repeat {
+        payload: Payload,
+        duration: Duration,
+        reply: Sender<Result<(), LinkError>>,
+    },
 }
 
 /// Handle used by operation threads to talk to the scheduler.
@@ -190,6 +197,18 @@ impl Radio {
         rx
     }
 
+    /// Broadcast `payload` back to back for `duration`, timed by the bridge
+    /// (no gaps whatever the host is doing). Nothing else is sent meanwhile.
+    pub fn repeat(&self, payload: Payload, duration: Duration) -> Result<(), LinkError> {
+        let (tx, rx) = crossbeam_channel::bounded(1);
+        self.submit(RadioReq::Repeat {
+            payload,
+            duration,
+            reply: tx,
+        });
+        wait_reply(&rx, REQ_TIMEOUT + duration, "repeat")
+    }
+
     pub fn reconfigure(&self, radio: RadioSettings) -> Result<(), LinkError> {
         let (tx, rx) = crossbeam_channel::bounded(1);
         self.submit(RadioReq::Reconfigure { radio, reply: tx });
@@ -238,6 +257,7 @@ enum TxCtx {
     UniCmd { id: u64 },
     UniPoll { id: u64 },
     Bcast { job: u64 },
+    Repeat,
 }
 
 struct InFlight {
@@ -394,6 +414,9 @@ pub(crate) struct Scheduler {
     tx_total: u64,
     tx_acked: u64,
     tx_failed: u64,
+    tx_probes_unanswered: u64,
+    /// A `TxRepeat` in progress: its end and who waits for it.
+    repeat: Option<(Instant, Sender<Result<(), LinkError>>)>,
     tx_lost: u64,
     show_dropped: u64,
     max_in_flight: usize,
@@ -450,6 +473,8 @@ impl Scheduler {
             tx_total: 0,
             tx_acked: 0,
             tx_failed: 0,
+            tx_probes_unanswered: 0,
+            repeat: None,
             tx_lost: 0,
             show_dropped: 0,
             max_in_flight: 0,
@@ -641,6 +666,9 @@ impl Scheduler {
         for (_, _, w) in self.cmd_waiters.drain(..) {
             let _ = w.send(Err(e.clone()));
         }
+        if let Some((_, reply)) = self.repeat.take() {
+            let _ = reply.send(Err(e.clone()));
+        }
         while let Ok(r) = self.req_rx.try_recv() {
             reject(r, e.clone());
         }
@@ -701,6 +729,11 @@ impl Scheduler {
                         reply: b.reply,
                     });
                 }
+                Ok(RadioReq::Repeat {
+                    payload,
+                    duration,
+                    reply,
+                }) => self.start_repeat(payload, duration, reply),
                 Ok(RadioReq::Reconfigure { radio, reply }) => {
                     self.radio = radio;
                     let cmd = Command::Configure(radio.to_radio_config());
@@ -717,6 +750,9 @@ impl Scheduler {
     // -- timers -------------------------------------------------------------
 
     fn timers(&mut self, now: Instant) {
+        if self.repeat.is_some() {
+            return; // a Pong behind the repeat would be a bogus clock sample
+        }
         if now >= self.next_ping {
             let seq = self.clock.ping_sent(now);
             self.out.push(Command::Ping { seq });
@@ -856,6 +892,41 @@ impl Scheduler {
 
     // -- transmission -------------------------------------------------------
 
+    fn start_repeat(&mut self, payload: Payload, duration: Duration, reply: Sender<Result<(), LinkError>>) {
+        if self.transport.is_none() {
+            let _ = reply.send(Err(LinkError::NotConnected));
+            return;
+        }
+        if self.repeat.is_some() {
+            let _ = reply.send(Err(LinkError::Busy("a repeat is already running".into())));
+            return;
+        }
+        let mut tag = self.next_tag;
+        while self.in_flight.contains_key(&tag) {
+            tag = tag.wrapping_add(1);
+        }
+        self.next_tag = tag.wrapping_add(1);
+        let duration_ms = duration.as_millis().min(u16::MAX as u128) as u16;
+        self.out.push(Command::TxRepeat {
+            tag,
+            slot: 0,
+            duration_ms,
+            payload,
+        });
+        let now = Instant::now();
+        self.in_flight.insert(
+            tag,
+            InFlight {
+                ctx: TxCtx::Repeat,
+                slot: 0,
+                sent: now,
+                addr: 0,
+                seq: 0,
+            },
+        );
+        self.repeat = Some((now + duration, reply));
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn push_tx(
         &mut self,
@@ -915,7 +986,9 @@ impl Scheduler {
     }
 
     fn fill(&mut self, now: Instant) {
-        if self.transport.is_none() {
+        // The bridge handles commands in order: anything sent behind a repeat
+        // would wait for its end (and time out here).
+        if self.transport.is_none() || self.repeat.is_some() {
             return;
         }
         let cap = self.cap();
@@ -1152,6 +1225,10 @@ impl Scheduler {
         self.tx_total += 1;
         match status {
             TxStatus::Acked => self.tx_acked += 1,
+            TxStatus::MaxRetries if !self.shared.lock().addr_owner.contains_key(&f.addr) => {
+                // Discovery probing an address no gift owns: no answer is normal.
+                self.tx_probes_unanswered += 1
+            }
             TxStatus::MaxRetries | TxStatus::Failed => self.tx_failed += 1,
             TxStatus::Sent => {}
         }
@@ -1192,6 +1269,15 @@ impl Scheduler {
             TxCtx::Show => {
                 if status == TxStatus::Sent {
                     self.show_done += 1;
+                }
+            }
+            TxCtx::Repeat => {
+                if let Some((_, reply)) = self.repeat.take() {
+                    let _ = reply.send(if status == TxStatus::Sent {
+                        Ok(())
+                    } else {
+                        Err(LinkError::Rejected(format!("bridge repeat: {status:?}")))
+                    });
                 }
             }
             TxCtx::Bcast { job } => {
@@ -1265,7 +1351,10 @@ impl Scheduler {
         let lost: Vec<u16> = self
             .in_flight
             .iter()
-            .filter(|(_, f)| now.duration_since(f.sent) > TXDONE_TIMEOUT)
+            .filter(|(_, f)| match (f.ctx, &self.repeat) {
+                (TxCtx::Repeat, Some((until, _))) => now > *until + TXDONE_TIMEOUT,
+                _ => now.duration_since(f.sent) > TXDONE_TIMEOUT,
+            })
             .map(|(t, _)| *t)
             .collect();
         for tag in lost {
@@ -1322,6 +1411,7 @@ impl Scheduler {
         l.tx_total = self.tx_total;
         l.tx_acked = self.tx_acked;
         l.tx_failed = self.tx_failed;
+        l.tx_probes_unanswered = self.tx_probes_unanswered;
         l.tx_lost = self.tx_lost;
         l.show_packets = self.counters.show_packets;
         l.show_dropped = self.show_dropped;
@@ -1355,7 +1445,7 @@ fn reject(r: RadioReq, e: LinkError) {
         RadioReq::Broadcast(b) => {
             let _ = b.reply.send(Err(e));
         }
-        RadioReq::Reconfigure { reply, .. } => {
+        RadioReq::Reconfigure { reply, .. } | RadioReq::Repeat { reply, .. } => {
             let _ = reply.send(Err(e));
         }
     }

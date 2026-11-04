@@ -760,6 +760,63 @@ impl Bridge {
         let _ = self.nrf.ce(false);
     }
 
+    /// `TxRepeat`: the same NO_ACK packet back to back for `duration_ms`
+    /// (CE high, TX FIFO kept topped up), then one `TxDone`. Timed here, not
+    /// by the host, so a wake-up burst has no gaps whatever the host does.
+    async fn tx_repeat(&mut self, tx: TxCmd, duration_ms: u16) {
+        let Some((buf, len)) = self.prepare(&tx).filter(|_| self.present) else {
+            return self.tx_failed(tx.tag).await;
+        };
+        if self.prepare_ptx().await.is_err() || self.set_tx_addr(tx.slot).is_err() {
+            return self.tx_failed(tx.tag).await;
+        }
+        let end = Instant::now() + Duration::from_millis(duration_ms as u64);
+        let mut ok = self.nrf.ce(true).is_ok();
+        // Packets loaded in the current TX-mode run: at `run_limit` (the 4 ms
+        // TX-mode budget, as in `tx_stream`) the FIFO drains to Standby-II and
+        // the next load re-settles the PLL (a ~0.2 ms gap, far shorter than a
+        // gift's 2 ms listen window).
+        let mut run: u8 = 0;
+        while ok && Instant::now() < end {
+            match self.nrf.fifo_status() {
+                Ok(f) if f & TX_EMPTY != 0 => {
+                    run = 0;
+                    ok = self.load(&tx, buf, len).is_ok();
+                    run += 1;
+                }
+                Ok(f) if f & TX_FULL == 0 && run < self.run_limit => {
+                    ok = self.load(&tx, buf, len).is_ok();
+                    run += 1;
+                }
+                Ok(_) => {
+                    // Full, or draining at the end of a run: a packet takes
+                    // ~100-350 µs on air.
+                    let _ = self.nrf.clear_irqs();
+                    Timer::after_micros(50).await;
+                }
+                Err(_) => ok = false,
+            }
+        }
+        // Let the packets still in the FIFO go out.
+        let t0 = Instant::now();
+        while ok && t0.elapsed() < Duration::from_millis(STREAM_STALL_MS) {
+            match self.nrf.fifo_status() {
+                Ok(f) if f & TX_EMPTY != 0 => break,
+                Ok(_) => Timer::after_micros(50).await,
+                Err(_) => ok = false,
+            }
+        }
+        let _ = self.nrf.ce(false);
+        let _ = self.nrf.flush_tx();
+        let _ = self.nrf.clear_irqs();
+        let _ = self.enter_idle();
+        if ok {
+            self.tx_done(tx.tag, TxStatus::Sent, 0, Payload::default()).await;
+        } else {
+            self.tx_failed(tx.tag).await;
+        }
+    }
+
     async fn abort_stream(&mut self, inflight: &mut InFlight) {
         let _ = self.nrf.ce(false);
         let _ = self.nrf.flush_tx();
@@ -931,6 +988,10 @@ impl Bridge {
             Command::GetStats => return self.reply(Event::Stats(self.stats)).await,
             Command::Tx { tag, slot, flags, ts_offset, payload } => {
                 return self.tx(src, TxCmd { tag, slot, flags, ts_offset, payload }).await;
+            }
+            Command::TxRepeat { tag, slot, duration_ms, payload } => {
+                let tx = TxCmd { tag, slot, flags: tx_flags::NO_ACK, ts_offset: 0, payload };
+                return self.tx_repeat(tx, duration_ms).await;
             }
             Command::Scan { first, last, dwell_us, repeats } => return self.scan(first, last, dwell_us, repeats).await,
             Command::Configure(c) => self.configure(c),

@@ -1039,7 +1039,10 @@ fn summary_inspector(app: &mut App, ui: &mut Ui) {
     widgets::kv_row(ui, "Show frames", lw, |ui| { widgets::value_unit(ui, &format!("{:.0}", l.frames_per_s), "/s", "value", TEXT_SECONDARY); });
     widgets::kv_row(ui, "Polls", lw, |ui| { widgets::value_unit(ui, &format!("{:.0}", l.polls_per_s), "/s", "value", TEXT_SECONDARY); });
     widgets::kv_text(ui, "TX total", lw, format!("{}", l.tx_total), "value");
-    let fail = l.tx_failed as f32 / l.tx_total.max(1) as f32 * 100.0;
+    // Of the transmissions that wait for an ack (polls and commands to known
+    // gifts); show frames are never acked and discovery probes of empty
+    // addresses are counted apart.
+    let fail = l.tx_failed as f32 / (l.tx_acked + l.tx_failed).max(1) as f32 * 100.0;
     widgets::kv_row(ui, "TX failed", lw, |ui| { widgets::value_unit(ui, &format!("{fail:.2}"), "%", "value", if fail > 5.0 { WARN } else { TEXT_SECONDARY }); });
     widgets::kv_text(ui, "Dropped show", lw, format!("{}", l.show_dropped), "value");
     widgets::kv_text(ui, "Channel", lw, format!("{}", app.snap.bridge.radio.channel), "value");

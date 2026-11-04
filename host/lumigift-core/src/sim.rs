@@ -499,7 +499,56 @@ impl World {
                 ts_offset,
                 payload,
             } => self.execute_tx(start, queued, tag, slot, flags, ts_offset, payload),
+            Command::TxRepeat {
+                tag,
+                slot,
+                duration_ms,
+                payload,
+            } => self.execute_repeat(start, tag, slot, duration_ms, payload),
         }
+    }
+
+    /// `TxRepeat`: the payload NO_ACK back to back (one PLL settle, then one
+    /// packet per air time) for `duration_ms`, then a single `TxDone`.
+    fn execute_repeat(&mut self, start: u64, tag: u16, slot: u8, duration_ms: u16, payload: Payload) {
+        self.sim_stats.tx += 1;
+        self.burst = None;
+        let status = if slot as usize >= self.tx_addr.len() || payload.is_empty() {
+            TxStatus::Failed
+        } else {
+            let addr = self.tx_addr[slot as usize];
+            let air = airtime_us(payload.len(), self.radio.data_rate);
+            let end = start + BRIDGE_LOAD_US + SETTLE_US + duration_ms as u64 * 1000;
+            let mut t = start + BRIDGE_LOAD_US + SETTLE_US;
+            while t + air <= end {
+                let pid = self.next_pid;
+                self.next_pid += 1;
+                for (i, pipe) in self.listeners(&addr, t + air) {
+                    if !self.lost(i) {
+                        self.gifts[i].receive(t + air, pipe, payload, pid, &mut self.p);
+                    }
+                }
+                t += air;
+            }
+            TxStatus::Sent
+        };
+        let end = start + BRIDGE_LOAD_US + SETTLE_US + duration_ms as u64 * 1000;
+        self.radio_free = end;
+        match status {
+            TxStatus::Sent => self.stats.tx_sent += 1,
+            _ => self.stats.tx_failed += 1,
+        }
+        let time_us = self.p.bridge_raw(end);
+        self.emit(
+            end,
+            Event::TxDone {
+                tag,
+                status,
+                retries: 0,
+                time_us,
+                ack_payload: Payload::default(),
+            },
+        );
     }
 
     #[allow(clippy::too_many_arguments)]

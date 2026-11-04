@@ -433,6 +433,17 @@ fn wake_burst(ctx: &Ctx) -> Result<u32, LinkError> {
     let _quiet = FlagGuard::set(&ctx.shared.polling_paused);
     let wake = encode(Packet::Broadcast(Broadcast::Wake));
     let burst = Duration::from_millis(lp::doze::WAKE_BURST_MS as u64);
+    // The bridge times the burst itself: no gaps whatever the host is doing.
+    // (Host-fed bursts had gaps on a busy PC that swallowed some gifts' 2 ms
+    // listen windows: 6-9 of 10 gifts woke.)
+    match ctx.radio.repeat(wake, burst) {
+        Ok(()) => return Ok(0),
+        Err(e) => ctx.log(
+            LogLevel::Warn,
+            None,
+            format!("wake: bridge burst failed ({e}); feeding it from the host (older bridge firmware?)"),
+        ),
+    }
     let t0 = Instant::now();
     let mut jobs: VecDeque<Receiver<Result<u32, LinkError>>> = VecDeque::new();
     let mut sent = 0;
@@ -517,7 +528,10 @@ pub(crate) fn wake(ctx: &Ctx, sweep: bool) -> Result<usize, LinkError> {
     ctx.log(
         LogLevel::Info,
         None,
-        format!("wake: {sent} Wake packets, {asleep} gift(s) were asleep, {n} online"),
+        format!(
+            "wake: {} {asleep} gift(s) were asleep, {n} online",
+            if sent > 0 { format!("{sent} Wake packets,") } else { "bridge Wake burst,".into() }
+        ),
     );
     Ok(n)
 }
@@ -788,7 +802,8 @@ pub(crate) fn discovery_thread(ctx: Ctx, rescans: Receiver<Sender<Result<usize, 
     let mut cursor: u8 = 0;
     let mut next_bg = Instant::now();
     let mut last_conflict_try: HashMap<u8, Instant> = HashMap::new();
-    let step = cfg.background_sweep_period / 254;
+    // Sweep fast while gifts are appearing, slowly once the fleet is stable.
+    let (mut gift_count, mut last_new) = (0usize, Instant::now());
     while !ctx.shared.stopping() {
         if !ctx.shared.connected.load(Ordering::Relaxed) {
             swept_this_connection = false;
@@ -869,7 +884,16 @@ pub(crate) fn discovery_thread(ctx: Ctx, rescans: Receiver<Sender<Result<usize, 
 
         // 3. Slow background sweep of unknown addresses.
         if cfg.auto_discover && now >= next_bg {
-            next_bg = now + step;
+            let n = ctx.shared.lock().gifts.len();
+            if n != gift_count {
+                (gift_count, last_new) = (n, now);
+            }
+            let period = if now.duration_since(last_new) < Duration::from_secs(60) {
+                cfg.background_sweep_period
+            } else {
+                cfg.background_sweep_idle_period
+            };
+            next_bg = now + period / 254;
             let known: BTreeSet<u8> = {
                 let st = ctx.shared.lock();
                 st.addr_owner

@@ -450,7 +450,11 @@ pub struct LinkStats {
     pub poll_ok_per_s: f32,
     pub tx_total: u64,
     pub tx_acked: u64,
+    /// Unacknowledged or failed transmissions to known gifts (and bridge
+    /// failures). Discovery probes of empty addresses are not failures.
     pub tx_failed: u64,
+    /// Discovery probes of addresses where no gift answered.
+    pub tx_probes_unanswered: u64,
     /// Show packets sent since start.
     pub show_packets: u64,
     /// Show packets replaced by a newer tick before they could be sent.

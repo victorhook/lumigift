@@ -820,6 +820,7 @@ impl App {
         row(ui, "Show frames", format!("{:.0}/s", l.frames_per_s), "value");
         row(ui, "Polls", format!("{:.0}/s", l.polls_per_s), "value");
         row(ui, "TX failed", format!("{} of {}", l.tx_failed, l.tx_total), "value");
+        row(ui, "Empty-address probes", format!("{}", l.tx_probes_unanswered), "value");
         row(ui, "Queue", format!("{} / {}", l.in_flight, l.max_in_flight.max(4)), "value");
         if let Some(rtt) = b.ping_rtt_us {
             row(ui, "Ping RTT", format!("{:.2} ms", rtt as f32 / 1000.0), "value");

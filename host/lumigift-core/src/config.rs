@@ -131,8 +131,12 @@ pub struct LinkConfig {
     /// ~1.3 s) on connecting to a bridge, before the discovery sweep: gifts
     /// doze by themselves after a minute without a host.
     pub wake_on_connect: bool,
-    /// The background sweep covers all unknown addresses in about this time.
+    /// The background sweep covers all unknown addresses in about this time
+    /// while gifts are still appearing (a new one in the last minute)...
     pub background_sweep_period: Duration,
+    /// ...and in this time once the fleet is stable. Every probe of an empty
+    /// address costs four unanswered transmissions (~2 ms of air time).
+    pub background_sweep_idle_period: Duration,
     /// Each gift's identity is re-checked (collision detection) this often.
     pub reidentify_interval: Duration,
     pub metadata: MetadataLocation,
@@ -160,6 +164,7 @@ impl Default for LinkConfig {
             auto_discover: true,
             wake_on_connect: true,
             background_sweep_period: Duration::from_secs(8),
+            background_sweep_idle_period: Duration::from_secs(60),
             reidentify_interval: Duration::from_secs(20),
             metadata: MetadataLocation::Default,
             history_len: 480,

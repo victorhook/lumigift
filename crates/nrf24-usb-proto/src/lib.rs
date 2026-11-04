@@ -281,6 +281,16 @@ pub enum Command {
         ts_offset: u8,
         payload: Payload,
     },
+    /// Send `payload` NO_ACK to `slot` back to back for `duration_ms`, timed
+    /// by the bridge (wake-up bursts must not have gaps, whatever the host
+    /// is doing). One `TxDone` (`Sent`, or `Failed`) for `tag` at the end;
+    /// the bridge handles no other command meanwhile.
+    TxRepeat {
+        tag: u16,
+        slot: u8,
+        duration_ms: u16,
+        payload: Payload,
+    },
     /// Queue a payload to attach to the next auto-ack on `pipe` (Rx mode).
     SetAckPayload {
         pipe: u8,
@@ -363,6 +373,7 @@ mod kind {
     pub const SCAN: u8 = 0x09;
     pub const GET_STATS: u8 = 0x0A;
     pub const RESET: u8 = 0x0B;
+    pub const TX_REPEAT: u8 = 0x0C;
 
     pub const INFO: u8 = 0x81;
     pub const PONG: u8 = 0x82;
@@ -389,6 +400,7 @@ impl Command {
             Command::Scan { .. } => SCAN,
             Command::GetStats => GET_STATS,
             Command::Reset => RESET,
+            Command::TxRepeat { .. } => TX_REPEAT,
         }
     }
 
@@ -434,6 +446,17 @@ impl Command {
             } => {
                 w.u16(tag)?;
                 w.bytes(&[slot, flags, ts_offset])?;
+                w.bytes(payload.as_slice())?;
+            }
+            Command::TxRepeat {
+                tag,
+                slot,
+                duration_ms,
+                payload,
+            } => {
+                w.u16(tag)?;
+                w.u8(slot)?;
+                w.u16(duration_ms)?;
                 w.bytes(payload.as_slice())?;
             }
             Command::SetAckPayload { pipe, payload } => {
@@ -514,6 +537,17 @@ impl Command {
                     slot,
                     flags,
                     ts_offset,
+                    payload: Payload::new(r.rest())?,
+                }
+            }
+            TX_REPEAT => {
+                let tag = r.u16()?;
+                let slot = r.u8()?;
+                let duration_ms = r.u16()?;
+                Command::TxRepeat {
+                    tag,
+                    slot,
+                    duration_ms,
                     payload: Payload::new(r.rest())?,
                 }
             }
@@ -878,6 +912,12 @@ mod tests {
             flags: tx_flags::NO_ACK,
             ts_offset: 2,
             payload: Payload::new(&[0xAA; 32]).unwrap(),
+        });
+        rt_cmd(Command::TxRepeat {
+            tag: 9,
+            slot: 2,
+            duration_ms: 1300,
+            payload: Payload::new(&[0x14]).unwrap(),
         });
         rt_cmd(Command::SetAckPayload {
             pipe: 1,
