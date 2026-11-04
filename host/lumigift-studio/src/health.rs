@@ -263,7 +263,14 @@ impl HealthTracker {
                 reasons.push((lvl, short, long));
             }
         };
-        push(boot, "In recovery".into(), "In recovery mode: update the firmware to bring it back.".into());
+        push(
+            boot,
+            "In recovery".into(),
+            "In recovery mode: its app reset three times in a row before starting up (often a flat \
+             battery browning out under LED load), or it has no valid firmware. Reboot it to try \
+             the app again; if it keeps coming back here, replace the battery or update the firmware."
+                .into(),
+        );
         push(
             batt,
             if batt == Level::Critical { "Battery critical".into() } else { "Low battery".into() },
