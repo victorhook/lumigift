@@ -21,11 +21,18 @@
 const RATE_SHIFT: u32 = 24;
 /// Clamp the frequency correction to ±4 %.
 const MAX_RATE: i64 = (1 << RATE_SHIFT) / 25;
-/// Samples per anchor window (80 ms at 100 frames/s).
+/// Samples per anchor window (80 ms at 100 frames/s)...
 pub const WINDOW: u8 = 8;
+/// ...or this much local time, whichever comes first. With the host's 10 Hz
+/// idle beacons a count-only window spanned 800 ms: 8+ ms of drift on a gift
+/// whose HSI48 is 1 % off, beyond `STEP_US`, so it re-seeded forever and
+/// never reported synced (6 of 10 gifts on hardware).
+pub const WINDOW_SPAN_US: u32 = 80_000;
 /// An innovation above this (bridge restart, a delayed seed) re-seeds.
 pub const STEP_US: i32 = 5000;
-/// This many consecutive samples more than `STEP_US` late also re-seed.
+/// Once locked, a sample this much later than the model is a delayed read.
+const LATE_US: i32 = 1000;
+/// This many consecutive late samples re-seed.
 const MAX_LATE: u8 = 4;
 /// Without samples for this long the clock is "not synced" and re-seeds.
 pub const LOCK_TIMEOUT_US: u32 = 1_000_000;
@@ -42,6 +49,7 @@ pub struct ClockSync {
     rate: i32,
     last_local: u32,
     win_n: u8,
+    win_start: u32,
     best_e: i32,
     best_local: u32,
     best_remote: u32,
@@ -59,6 +67,7 @@ impl ClockSync {
             rate: 0,
             last_local: 0,
             win_n: 0,
+            win_start: 0,
             best_e: 0,
             best_local: 0,
             best_remote: 0,
@@ -97,12 +106,21 @@ impl ClockSync {
             self.seed(remote, local);
             return;
         }
+        // Close a window that has run its time first, so this sample is
+        // judged against an anchor at most ~one window old.
+        if self.win_n > 0 && local.wrapping_sub(self.win_start) >= WINDOW_SPAN_US {
+            self.close_window();
+        }
         let e = remote.wrapping_sub(self.now(local)) as i32;
         if e > STEP_US {
             self.seed(remote, local);
             return;
         }
-        if e < -STEP_US {
+        // Far later than the model: a delayed read (busy main loop, flash
+        // write), not drift. Once locked "far" is 1 ms: with one sample per
+        // window (10 Hz idle beacons) nothing else would outvote it.
+        let late_limit = if self.anchors >= ACQUIRE_ANCHORS { LATE_US } else { STEP_US };
+        if e < -late_limit {
             self.late += 1;
             if self.late >= MAX_LATE {
                 self.seed(remote, local);
@@ -110,15 +128,22 @@ impl ClockSync {
             return;
         }
         self.late = 0;
+        if self.win_n == 0 {
+            self.win_start = local;
+        }
         if self.win_n == 0 || e > self.best_e {
             self.best_e = e;
             self.best_local = local;
             self.best_remote = remote;
         }
         self.win_n += 1;
-        if self.win_n < WINDOW {
-            return;
+        if self.win_n >= WINDOW {
+            self.close_window();
         }
+    }
+
+    /// Re-anchor on the least-delayed sample of the window and update the rate.
+    fn close_window(&mut self) {
         self.win_n = 0;
         let span = self.best_local.wrapping_sub(self.base_local);
         if self.anchors > 0 && (20_000..=2 * LOCK_TIMEOUT_US).contains(&span) {
@@ -178,6 +203,12 @@ mod tests {
     /// 37th frame (including the very first one). Returns the worst
     /// |synced - true| over the last second, probed between frames.
     fn simulate(ppm: i64, max_delay: u32) -> (u32, ClockSync) {
+        simulate_every(ppm, max_delay, 10_000, 1000).0
+    }
+
+    /// Like [`simulate`] with samples every `interval` µs (`n` of them);
+    /// also returns the fraction of the last half that reported synced.
+    fn simulate_every(ppm: i64, max_delay: u32, interval: u32, n: u32) -> ((u32, ClockSync), f32) {
         let start_remote = 4_000_000_000u32; // wraps during the run
         let offset = 123_456_789u32;
         let true_local = |r: u32| -> u32 {
@@ -187,20 +218,38 @@ mod tests {
         let mut s = ClockSync::new();
         let mut rng = Lcg(42);
         let mut worst = 0u32;
-        for k in 0..1000u32 {
-            let remote = start_remote.wrapping_add(k * 10_000);
+        let mut synced = 0u32;
+        for k in 0..n {
+            let remote = start_remote.wrapping_add(k * interval);
             let mut delay = rng.next() % max_delay;
             if k % 37 == 0 {
                 delay += 3000;
             }
-            s.sample(remote, true_local(remote.wrapping_add(delay)));
-            if k > 900 {
-                let probe = remote.wrapping_add(5000);
+            let local = true_local(remote.wrapping_add(delay));
+            s.sample(remote, local);
+            if k >= n / 2 && s.synced(local) {
+                synced += 1;
+            }
+            if k > n * 9 / 10 {
+                let probe = remote.wrapping_add(interval / 2);
                 let err = s.now(true_local(probe)).wrapping_sub(probe) as i32;
                 worst = worst.max(err.unsigned_abs());
             }
         }
-        (worst, s)
+        ((worst, s), synced as f32 / (n - n / 2) as f32)
+    }
+
+    /// Idle: the host's `Sync` beacons come at 10 Hz. A gift whose HSI48 is
+    /// ±1-2 % off must still lock (on hardware 6 of 10 gifts never did: an
+    /// 8-sample window spanned 800 ms = 8+ ms of drift, beyond `STEP_US`, so
+    /// they re-seeded forever).
+    #[test]
+    fn locks_on_idle_beacons() {
+        for &ppm in &[0i64, 6_000, -6_000, 10_000, -10_000, 20_000, -20_000] {
+            let ((worst, s), synced) = simulate_every(ppm, 200, 100_000, 200);
+            assert!(synced > 0.99, "ppm {ppm}: synced {:.0} % of the time: {s:?}", synced * 100.0);
+            assert!(worst < 400, "ppm {ppm}: worst error {worst} µs");
+        }
     }
 
     #[test]
