@@ -652,6 +652,10 @@ fn shortcuts(app: &mut App, ui: &mut Ui) {
     if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
         apply(app);
     }
+    if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        app.selection.clear();
+        app.focus = None;
+    }
 }
 
 fn header(app: &mut App, ui: &mut Ui) {
@@ -810,30 +814,29 @@ fn stage(app: &mut App, ui: &mut Ui, rect: Rect) {
         );
     }
     let resp = app.stage_preview.show(ui, &gifts, &opts);
-    // Click to select gifts (Ctrl+click toggles), for the "Selected" target.
-    if let Some(id) = resp.clicked
+    // Click to select gifts (Ctrl+click toggles), for the "Selected" target;
+    // clicking the floor clears the selection.
+    if resp.clicked_background && !virtual_row {
+        app.selection.clear();
+        app.focus = None;
+    } else if let Some(id) = resp.clicked
         && !virtual_row
-    {
-        if id == u64::MAX {
-            app.selection.clear();
-            app.focus = None;
-        } else if let Some(g) = app
+        && let Some(g) = app
             .snap
             .gifts
             .iter()
             .find(|g| crate::pages::stage_page::uid_id(&g.uid) == id)
-        {
-            let u = g.uid;
-            if ui.input(|i| i.modifiers.command) {
-                if !app.selection.remove(&u) {
-                    app.selection.insert(u);
-                }
-            } else {
-                app.selection = [u].into();
+    {
+        let u = g.uid;
+        if ui.input(|i| i.modifiers.command) {
+            if !app.selection.remove(&u) {
+                app.selection.insert(u);
             }
-            app.focus = Some(u);
-            app.lighting.target = TargetSel::Selected;
+        } else {
+            app.selection = [u].into();
         }
+        app.focus = Some(u);
+        app.lighting.target = TargetSel::Selected;
     }
     let p = ui.painter();
     let (txt, col) = if app.lighting.armed {
@@ -867,7 +870,7 @@ fn stage(app: &mut App, ui: &mut Ui, rect: Rect) {
     if !virtual_row {
         let n = app.selection.len();
         let hint = if n > 0 {
-            format!("{n} selected · Ctrl+click to add")
+            format!("{n} selected · Ctrl+click to add · click the floor or Esc to clear")
         } else {
             "Click gifts to select them".into()
         };
@@ -1167,6 +1170,21 @@ fn side_panel(app: &mut App, ui: &mut Ui) {
 fn output_section(app: &mut App, ui: &mut Ui) {
     widgets::overline(ui, "Output");
     ui.add_space(8.0);
+    // Master scales every layer: at 0 every look renders black.
+    if app.persist.lighting.master == 0 {
+        widgets::note(
+            ui,
+            "Master is at 0 %: every look is dark. Raise Master under Quick actions.",
+            WARN_SOFT,
+            WARN,
+            8.0,
+        );
+        ui.add_space(4.0);
+        if widgets::secondary_button_h(ui, None, "Master back to 100 %", true, 24.0).clicked() {
+            app.persist.lighting.master = 255;
+        }
+        ui.add_space(10.0);
+    }
     let armed = app.lighting.armed;
     let (icon, line, color) = if app.backend.is_none() {
         (

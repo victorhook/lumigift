@@ -130,6 +130,9 @@ pub struct StageResponse {
     pub hovered: Option<u64>,
     /// Gift clicked this frame (primary button, no drag).
     pub clicked: Option<u64>,
+    /// The floor / background was clicked (no gift under the pointer):
+    /// apps usually clear their selection.
+    pub clicked_background: bool,
     /// New floor positions `(id, [x, z])` from dragging in edit mode. The app
     /// should apply them to its layout; the dragged box renders at the drag
     /// position meanwhile.
@@ -355,6 +358,7 @@ impl Stage {
         let mut out = StageResponse {
             hovered: None,
             clicked: None,
+            clicked_background: false,
             moved: Vec::new(),
             response,
         };
@@ -497,6 +501,7 @@ impl Stage {
             cam_input = true;
         } else if response.clicked() {
             out.clicked = hovered;
+            out.clicked_background = hovered.is_none();
         }
 
         if opts.performance && !cam_input {

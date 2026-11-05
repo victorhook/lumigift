@@ -237,6 +237,42 @@ pub(crate) fn auto_assign_slots(ctx: &Ctx, mode: SlotAssign) -> Result<CmdReport
     Ok(r)
 }
 
+/// Slots 0, 1, 2, … for `order` (e.g. the gifts' order in the room). Other
+/// gifts holding one of those slots move to the lowest free ones, so no two
+/// gifts share a slot.
+pub(crate) fn assign_slots_in_order(ctx: &Ctx, order: &[Uid]) -> Result<CmdReport, LinkError> {
+    ctx.check_connected()?;
+    if order.len() > lp::MAX_SLOTS as usize {
+        return Err(LinkError::Rejected(format!("at most {} gifts", lp::MAX_SLOTS)));
+    }
+    let gifts: Vec<(Uid, u8)> = {
+        let st = ctx.shared.lock();
+        let mut v: Vec<(Uid, u8)> = st.gifts.values().map(|g| (g.uid, g.slot)).collect();
+        v.sort();
+        v
+    };
+    let mut plan: BTreeMap<Uid, u8> = order.iter().enumerate().map(|(i, u)| (*u, i as u8)).collect();
+    let used: BTreeSet<u8> = (0..order.len() as u8).collect();
+    let mut taken = used.clone();
+    for &(u, s) in &gifts {
+        if !plan.contains_key(&u) && s < lp::MAX_SLOTS && !taken.insert(s) {
+            // Its slot now belongs to an ordered gift: the next free one.
+            if let Some(f) = (0..lp::MAX_SLOTS).find(|f| !taken.contains(f)) {
+                taken.insert(f);
+                plan.insert(u, f);
+            }
+        }
+    }
+    let mut res = Vec::new();
+    for (u, cur) in gifts {
+        let Some(&want) = plan.get(&u) else { continue };
+        res.push((u, if want == cur { Ok(()) } else { set_slot(ctx, u, Some(want)) }));
+    }
+    let r = report(res);
+    ctx.log(LogLevel::Info, None, format!("slots in order ({} gifts): {r}", order.len()));
+    Ok(r)
+}
+
 pub(crate) fn reboot(
     ctx: &Ctx,
     target: &Target,

@@ -193,8 +193,23 @@ pub struct App {
     pub compact: bool,
     pub renaming: Option<(Uid, String)>,
     pub slot_popup: Option<Uid>,
+    /// "Blink in sequence": one gift after the other.
+    pub blink_seq: Option<BlinkSeq>,
     connected_once: bool,
 }
+
+/// A running "blink in sequence" (see [`App::blink_sequence`]).
+pub struct BlinkSeq {
+    /// Gifts still to blink, in order.
+    queue: std::collections::VecDeque<Uid>,
+    /// The gift blinking now, its 1-based position and the total.
+    pub current: Option<(Uid, usize)>,
+    pub total: usize,
+    next_at: Instant,
+}
+
+/// Time between two gifts of a blink sequence.
+const BLINK_SEQ_STEP: Duration = Duration::from_millis(800);
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>, opts: StartOptions) -> Self {
@@ -206,6 +221,11 @@ impl App {
             .unwrap_or_default();
         if opts.screenshot_dir.is_some() {
             persist = Persist::default();
+        }
+        // A Lighting master saved at 0 would make every look dark on the next
+        // start with no visible cause; start at full instead.
+        if persist.lighting.master == 0 {
+            persist.lighting.master = 255;
         }
         cc.egui_ctx.set_zoom_factor(persist.zoom.clamp(0.8, 1.5));
         let detector = Detector::default();
@@ -262,6 +282,7 @@ impl App {
             compact: false,
             renaming: None,
             slot_popup: None,
+            blink_seq: None,
             connected_once: false,
         };
         app.last_page = app.persist.page;
@@ -365,6 +386,46 @@ impl App {
         self.fleet.ripple_at = Some(Instant::now());
     }
 
+    /// Blink `uids` one after the other (twice each, 0.8 s apart), so each
+    /// box can be told apart in the room. Calling it while a sequence runs
+    /// stops it.
+    pub fn blink_sequence(&mut self, uids: Vec<Uid>) {
+        if self.blink_seq.take().is_some() {
+            self.toasts.info("Blink sequence stopped");
+            return;
+        }
+        if self.link().is_none() || uids.is_empty() {
+            return;
+        }
+        let total = uids.len();
+        self.toasts.info(format!("Blinking {total} gift{} in sequence", if total == 1 { "" } else { "s" }));
+        self.blink_seq = Some(BlinkSeq { queue: uids.into(), current: None, total, next_at: Instant::now() });
+    }
+
+    /// Advance the blink sequence (every frame).
+    fn tick_blink_seq(&mut self, ctx: &egui::Context) {
+        let Some(seq) = &mut self.blink_seq else { return };
+        let now = Instant::now();
+        if now >= seq.next_at {
+            match seq.queue.pop_front() {
+                Some(uid) => {
+                    let n = seq.total - seq.queue.len();
+                    seq.current = Some((uid, n));
+                    seq.next_at = now + BLINK_SEQ_STEP;
+                    if let Some(link) = self.backend.as_ref().map(|b| b.link.clone()) {
+                        // Fire and forget: dropping the handle does not cancel it.
+                        let _ = link.blink(Target::Gifts(vec![uid]), self.blink_color, 2, Duration::from_millis(250));
+                    }
+                }
+                None => {
+                    self.blink_seq = None;
+                    return;
+                }
+            }
+        }
+        ctx.request_repaint_after(Duration::from_millis(50));
+    }
+
     pub fn reboot(&mut self, uids: Vec<Uid>, bootloader: bool) {
         let Some(link) = self.link().cloned() else { return };
         let label = self.targets_label(&uids);
@@ -464,7 +525,9 @@ impl App {
             self.snap = b.link.snapshot();
         } else {
             self.snap = Arc::new(Snapshot::default());
+            self.blink_seq = None;
         }
+        self.tick_blink_seq(ctx);
         if self.connected() {
             self.connected_once = true;
         }
@@ -631,10 +694,7 @@ impl App {
             .show(ui, |ui| {
                 let full = ui.max_rect();
                 ui.painter().vline(full.right() - 0.5, full.y_range(), Stroke::new(1.0, BORDER_SUBTLE));
-                // Logo
-                let (lr, _) = ui.allocate_exact_size(vec2(w, 56.0), Sense::hover());
-                widgets::brand_glyph(ui.painter(), lr.center(), 22.0);
-                let mut y = lr.bottom() + 4.0;
+                let mut y = full.top() + 10.0;
                 let item_h = if self.compact { 44.0 } else { 56.0 };
                 for (i, p) in Page::ALL.iter().enumerate() {
                     if *p == Page::Settings {
@@ -1093,6 +1153,13 @@ impl App {
             A::Perform => self.set_performance(ctx, true),
             A::Cheatsheet => self.cheatsheet = true,
             A::Blink(u) => self.blink(vec![u]),
+            A::BlinkSequence => {
+                if self.persist.page == Page::Stage {
+                    crate::pages::stage_page::blink_in_sequence(self);
+                } else {
+                    crate::pages::fleet::blink_in_sequence(self);
+                }
+            }
             A::BlinkSelected => {
                 let s: Vec<Uid> = self.selection.iter().copied().collect();
                 self.blink(s)

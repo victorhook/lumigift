@@ -21,6 +21,7 @@ pub enum PaletteAction {
     Perform,
     Cheatsheet,
     Blink(Uid),
+    BlinkSequence,
     BlinkSelected,
     Select(Uid),
     Rename(Uid),
@@ -109,6 +110,7 @@ pub fn build_commands(app: &App) -> Vec<Command> {
     v.push(cmd("Gifts", icons::REBOOT, "Reboot all gifts…", None, A::RebootAll));
     v.push(cmd("Gifts", icons::SEARCH, "Rescan for gifts", Some("Ctrl+R"), A::Rescan));
     v.push(cmd("Gifts", icons::LIST_NUMBERS, "Auto-assign slots", None, A::AutoAssign));
+    v.push(cmd("Gifts", icons::LIGHTNING, if app.blink_seq.is_some() { "Stop the blink sequence" } else { "Blink all gifts in sequence" }, Some("Shift+B"), A::BlinkSequence));
     v.push(cmd("Gifts", icons::MOON, "Sleep all gifts", None, A::SleepAll));
     v.push(cmd("Gifts", icons::SUN, "Wake all gifts", None, A::WakeAll));
     v.push(cmd("Show", icons::FILE_AUDIO, "Open audio file…", Some("Ctrl+Shift+O"), A::OpenAudio));

@@ -259,6 +259,12 @@ impl Link {
         self.spawn("auto-slots", move |c| ops::auto_assign_slots(c, mode))
     }
 
+    /// Slots 0, 1, 2, … in the given order (e.g. left to right in the room);
+    /// other gifts holding those slots move to free ones.
+    pub fn assign_slots_in_order(&self, order: Vec<Uid>) -> Pending<CmdReport> {
+        self.spawn("order-slots", move |c| ops::assign_slots_in_order(c, &order))
+    }
+
     pub fn reboot(&self, target: impl Into<Target>, into_bootloader: bool) -> Pending<CmdReport> {
         let t = target.into();
         self.spawn("reboot", move |c| ops::reboot(c, &t, into_bootloader))

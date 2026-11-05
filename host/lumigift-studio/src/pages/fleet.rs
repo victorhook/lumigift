@@ -130,6 +130,10 @@ pub fn page(app: &mut App, ui: &mut Ui) {
         if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::A)) {
             app.selection = app.snap.gifts.iter().map(|g| g.uid).collect();
         }
+        // Shift+B before B: a plain-key match also accepts Shift.
+        if ui.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::B)) {
+            blink_in_sequence(app);
+        }
         if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::B)) {
             let s: Vec<Uid> = app.selection.iter().copied().collect();
             app.blink(s);
@@ -1370,4 +1374,22 @@ fn slot_picker(app: &mut App, ui: &mut Ui, uid: Uid) {
         }
         None => d.remove::<(u8, Uid)>(pend_id),
     });
+}
+
+/// Blink the selected gifts (or all online ones) one after the other in slot
+/// order (gifts without a slot last, by name). Stops a running sequence.
+pub fn blink_in_sequence(app: &mut App) {
+    if app.blink_seq.is_some() {
+        app.blink_sequence(Vec::new());
+        return;
+    }
+    let mut gifts: Vec<(Option<u8>, String, Uid)> = app
+        .snap
+        .gifts
+        .iter()
+        .filter(|g| if app.selection.is_empty() { g.online } else { app.selection.contains(&g.uid) })
+        .map(|g| (g.slot, app.gift_name(&g.uid), g.uid))
+        .collect();
+    gifts.sort_by(|a, b| (a.0.is_none(), a.0, &a.1).cmp(&(b.0.is_none(), b.0, &b.1)));
+    app.blink_sequence(gifts.into_iter().map(|g| g.2).collect());
 }

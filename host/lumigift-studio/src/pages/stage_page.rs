@@ -1,6 +1,8 @@
 //! Stage page: full-bleed stage view with floating arrange tools and a mini
 //! transport (docs/UI_DESIGN.md §3.2 Stage, §5.6).
 
+use std::time::Instant;
+
 use egui::{Align, Align2, CornerRadius, Key, Layout, Modifiers, Rect, Sense, Stroke, StrokeKind, Ui, pos2, vec2};
 use lumigift_core::Uid;
 
@@ -15,6 +17,59 @@ pub struct StagePage {
     pub preset: usize,
     pub framed_n: usize,
     pub preview_framed_n: usize,
+    /// "Set order" in progress (see [`OrderWizard`]).
+    pub order: Option<OrderWizard>,
+}
+
+/// "Set order": the gifts blink one at a time and the user says where each
+/// one stands in the room (counting from the left). Saving assigns slots in
+/// that order (spatial looks then run the right way on the real gifts) and
+/// moves the stage boxes to match.
+pub struct OrderWizard {
+    /// Gifts still to place, the one blinking first.
+    queue: Vec<Uid>,
+    /// Room position (0 = leftmost) → gift.
+    placed: Vec<Option<Uid>>,
+    /// Placements, for Back.
+    history: Vec<(Uid, usize)>,
+    next_blink: Instant,
+}
+
+impl OrderWizard {
+    fn new(gifts: Vec<Uid>) -> Self {
+        let n = gifts.len();
+        Self { queue: gifts, placed: vec![None; n], history: Vec::new(), next_blink: Instant::now() }
+    }
+    fn current(&self) -> Option<Uid> {
+        self.queue.first().copied()
+    }
+    fn place(&mut self, pos: usize) {
+        if let Some(u) = self.current()
+            && self.placed.get(pos).is_some_and(|p| p.is_none())
+        {
+            self.placed[pos] = Some(u);
+            self.queue.remove(0);
+            self.history.push((u, pos));
+            self.next_blink = Instant::now();
+        }
+    }
+    fn back(&mut self) {
+        if let Some((u, pos)) = self.history.pop() {
+            self.placed[pos] = None;
+            self.queue.insert(0, u);
+            self.next_blink = Instant::now();
+        }
+    }
+    fn skip(&mut self) {
+        if self.queue.len() > 1 {
+            let u = self.queue.remove(0);
+            self.queue.push(u);
+            self.next_blink = Instant::now();
+        }
+    }
+    fn done(&self) -> bool {
+        self.queue.is_empty()
+    }
 }
 
 /// Marker: the camera was restored from settings, don't auto-frame.
@@ -22,7 +77,7 @@ pub const SKIP_AUTO_FRAME: usize = usize::MAX - 1;
 
 impl Default for StagePage {
     fn default() -> Self {
-        Self { arrange: false, preset: 2, framed_n: usize::MAX, preview_framed_n: usize::MAX }
+        Self { arrange: false, preset: 2, framed_n: usize::MAX, preview_framed_n: usize::MAX, order: None }
     }
 }
 
@@ -117,7 +172,12 @@ pub fn number_left_to_right(app: &mut App) {
 
 pub fn page(app: &mut App, ui: &mut Ui) {
     let typing = ui.ctx().egui_wants_keyboard_input();
-    if !typing && !app.palette.is_open() {
+    // Set order owns the keys (digits = positions) while it runs.
+    let ordering = app.stage_page.order.is_some();
+    if ordering && !typing && !app.palette.is_open() {
+        order_keys(app, ui);
+    }
+    if !ordering && !typing && !app.palette.is_open() {
         if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::A)) {
             app.stage_page.arrange = !app.stage_page.arrange;
             if app.stage_page.arrange {
@@ -137,6 +197,30 @@ pub fn page(app: &mut App, ui: &mut Ui) {
         if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F)) {
             let g = stage_gifts(app);
             app.stage.frame_all(&g);
+        }
+        // Gift actions, as on the Fleet page.
+        if ui.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::B)) {
+            blink_in_sequence(app);
+        }
+        if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::B)) {
+            let s: Vec<Uid> = app.selection.iter().copied().collect();
+            if s.is_empty() {
+                app.toasts.info("Click gifts to select them, or Shift+B to blink all in sequence");
+            }
+            app.blink(s);
+        }
+        if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::S))
+            && let Some(u) = app.focus
+        {
+            app.slot_popup = Some(u);
+            app.persist.inspector_open = true;
+        }
+        if ui.input_mut(|i| i.consume_key(Modifiers::COMMAND, Key::A)) {
+            app.selection = app.snap.gifts.iter().map(|g| g.uid).collect();
+        }
+        if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+            app.selection.clear();
+            app.focus = None;
         }
     }
     let ctx = ui.ctx().clone();
@@ -165,6 +249,20 @@ pub fn page(app: &mut App, ui: &mut Ui) {
             if widgets::ghost_button(ui, icons::CROSSHAIR, "Frame all", Some("F")).clicked() {
                 let g = stage_gifts(app);
                 app.stage.frame_all(&g);
+            }
+            let can_order = app.connected() && app.snap.gifts.iter().filter(|g| g.online).count() >= 2;
+            if widgets::ghost_button_sized(ui, icons::LIST_NUMBERS, "Set order: say where each blinking gift stands in the room", None, CONTROL_H, app.stage_page.order.is_some()).clicked() && can_order {
+                start_order(app);
+            }
+            let seq_tip = if app.blink_seq.is_some() {
+                "Stop the blink sequence"
+            } else if app.selection.is_empty() {
+                "Blink all gifts one after the other, left to right"
+            } else {
+                "Blink the selected gifts one after the other, left to right"
+            };
+            if widgets::ghost_button_sized(ui, icons::LIGHTNING, seq_tip, Some("Shift+B"), CONTROL_H, app.blink_seq.is_some()).clicked() {
+                blink_in_sequence(app);
             }
             ui.add_space(8.0);
             let mut cam = usize::MAX;
@@ -220,21 +318,39 @@ pub fn page(app: &mut App, ui: &mut Ui) {
             app.persist.stage_positions.insert(key, [pos[0], pos[1], yaw]);
         }
     }
-    if let Some(id) = resp.clicked {
-        if id == u64::MAX {
-            app.selection.clear();
-            app.focus = None;
-        } else if let Some(g) = app.snap.gifts.iter().find(|g| uid_id(&g.uid) == id) {
-            let u = g.uid;
-            if ui.input(|i| i.modifiers.command) {
-                if !app.selection.remove(&u) {
-                    app.selection.insert(u);
-                }
-            } else {
-                app.selection = [u].into();
+    if resp.clicked_background {
+        app.selection.clear();
+        app.focus = None;
+    } else if let Some(id) = resp.clicked
+        && let Some(g) = app.snap.gifts.iter().find(|g| uid_id(&g.uid) == id)
+    {
+        let u = g.uid;
+        if ui.input(|i| i.modifiers.command) {
+            if !app.selection.remove(&u) {
+                app.selection.insert(u);
             }
-            app.focus = Some(u);
+        } else {
+            app.selection = [u].into();
         }
+        app.focus = Some(u);
+    }
+
+    if app.stage_page.order.is_some() {
+        order_panel(app, ui, rect);
+    }
+
+    // Blink sequence progress (top-centre).
+    if let Some(seq) = &app.blink_seq
+        && let Some((uid, n)) = seq.current
+    {
+        let txt = format!("{}  Blinking {n} / {} · {}", icons::LIGHTNING, seq.total, app.gift_name(&uid));
+        ui.painter().text(
+            pos2(rect.center().x, rect.top() + 14.0),
+            Align2::CENTER_TOP,
+            txt,
+            theme::font("small_medium"),
+            ACCENT_TEXT,
+        );
     }
 
     // Floating arrange panel (top-left).
@@ -310,6 +426,192 @@ pub fn floating(ui: &mut Ui, rect: Rect, add: impl FnOnce(&mut Ui)) {
     widgets::top_highlight(p, rect, R_LG as f32);
     let mut child = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink(12.0)).layout(Layout::top_down(Align::Min)));
     add(&mut child);
+}
+
+// -- Set order ------------------------------------------------------------------
+
+/// Start "Set order" with the online gifts (or stop it if it runs).
+pub fn start_order(app: &mut App) {
+    if app.stage_page.order.take().is_some() {
+        return;
+    }
+    app.blink_seq = None;
+    let mut gifts: Vec<(Option<u8>, Uid)> = app.snap.gifts.iter().filter(|g| g.online).map(|g| (g.slot, g.uid)).collect();
+    gifts.sort_by_key(|g| (g.0.is_none(), g.0, g.1));
+    if gifts.len() < 2 {
+        app.toasts.info("Set order needs at least two gifts online");
+        return;
+    }
+    app.stage_page.order = Some(OrderWizard::new(gifts.into_iter().map(|g| g.1).collect()));
+}
+
+fn order_keys(app: &mut App, ui: &mut Ui) {
+    let Some(w) = &mut app.stage_page.order else { return };
+    let n = w.placed.len();
+    let digits = [Key::Num1, Key::Num2, Key::Num3, Key::Num4, Key::Num5, Key::Num6, Key::Num7, Key::Num8, Key::Num9, Key::Num0];
+    for (i, k) in digits.into_iter().enumerate() {
+        if i < n && ui.input_mut(|inp| inp.consume_key(Modifiers::NONE, k)) {
+            w.place(i);
+        }
+    }
+    if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Backspace)) {
+        w.back();
+    }
+    if ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        app.stage_page.order = None;
+        return;
+    }
+    if w.done() && ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+        save_order(app);
+    }
+}
+
+/// Slots 0..n in room order, and the stage boxes moved to match: the
+/// existing positions, left to right, go to the gifts in room order (so a
+/// curved layout keeps its shape).
+fn save_order(app: &mut App) {
+    let Some(w) = app.stage_page.order.take() else { return };
+    let order: Vec<Uid> = w.placed.into_iter().flatten().collect();
+    let mut spots: Vec<[f32; 3]> = order
+        .iter()
+        .map(|u| app.persist.stage_positions.get(&u.to_hex()).copied().unwrap_or([0.0; 3]))
+        .collect();
+    spots.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+    if spots.windows(2).all(|p| (p[1][0] - p[0][0]).abs() < 1e-3 && (p[1][1] - p[0][1]).abs() < 1e-3) {
+        // No usable layout yet: a centred row.
+        let n = spots.len() as f32;
+        for (i, s) in spots.iter_mut().enumerate() {
+            *s = [(i as f32 - (n - 1.0) / 2.0) * SPACING, 0.0, 0.0];
+        }
+    }
+    for (u, s) in order.iter().zip(spots) {
+        app.persist.stage_positions.insert(u.to_hex(), s);
+    }
+    if let Some(link) = app.link().cloned() {
+        let p = link.assign_slots_in_order(order.clone());
+        app.push_op(
+            "Set order",
+            format!("Slots 1–{} follow the room, left to right", order.len()),
+            crate::app::OpKind::Report(p),
+        );
+    }
+    let g = stage_gifts(app);
+    app.stage.frame_all(&g);
+}
+
+/// The floating Set order panel (bottom-centre of the stage), and the
+/// blinking of the gift being placed.
+fn order_panel(app: &mut App, ui: &mut Ui, stage: Rect) {
+    let Some(w) = &mut app.stage_page.order else { return };
+    // Keep the current gift blinking (3 × 300 ms, re-sent every second).
+    if let Some(u) = w.current()
+        && Instant::now() >= w.next_blink
+    {
+        w.next_blink = Instant::now() + std::time::Duration::from_millis(1000);
+        if let Some(link) = app.backend.as_ref().map(|b| b.link.clone()) {
+            let _ = link.blink(lumigift_core::Target::Gifts(vec![u]), app.blink_color, 3, std::time::Duration::from_millis(300));
+        }
+    }
+    ui.ctx().request_repaint_after(std::time::Duration::from_millis(100));
+
+    let n = w.placed.len();
+    let current = w.current();
+    let placed_n = n - w.queue.len();
+    let placed = w.placed.clone();
+    let can_back = !w.history.is_empty();
+    let can_skip = w.queue.len() > 1;
+    let done = w.done();
+    let names: Vec<Option<String>> = placed.iter().map(|p| p.map(|u| app.gift_name(&u))).collect();
+    let cur_name = current.map(|u| app.gift_name(&u));
+
+    let width = (n as f32 * 64.0 + 40.0).clamp(420.0, stage.width() - 40.0);
+    let mut action: Option<(&str, usize)> = None;
+    egui::Area::new(egui::Id::unique("set-order"))
+        .fixed_pos(pos2(stage.center().x - width / 2.0, stage.bottom() - 200.0))
+        .order(egui::Order::Foreground)
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new()
+                .fill(SURFACE_2)
+                .stroke(Stroke::new(1.0, BORDER_STRONG))
+                .corner_radius(CornerRadius::same(R_MD))
+                .inner_margin(egui::Margin::same(16))
+                .show(ui, |ui| {
+                    ui.set_width(width - 32.0);
+                    ui.horizontal(|ui| {
+                        widgets::text(ui, "Set order", "title", TEXT);
+                        widgets::text(ui, format!("{placed_n} / {n} placed"), "value_small", TEXT_FAINT);
+                    });
+                    ui.add_space(4.0);
+                    let line = match &cur_name {
+                        Some(name) => format!("{}  {name} is blinking. Where does it stand, counting from the left?", icons::LIGHTNING),
+                        None => "All gifts placed. Save to assign the slots in this order.".to_string(),
+                    };
+                    widgets::text(ui, line, "body", if done { TEXT_SECONDARY } else { ACCENT_TEXT });
+                    ui.add_space(10.0);
+                    ui.horizontal_wrapped(|ui| {
+                        ui.spacing_mut().item_spacing = vec2(6.0, 6.0);
+                        for (i, name) in names.iter().enumerate() {
+                            let key = if i < 9 { format!("{}", i + 1) } else if i == 9 { "0".into() } else { String::new() };
+                            let (r, resp) = ui.allocate_exact_size(vec2(58.0, 46.0), if name.is_none() && !done { Sense::click() } else { Sense::hover() });
+                            let p = ui.painter();
+                            let hov = resp.hovered() && name.is_none();
+                            p.rect_filled(r, CornerRadius::same(R_SM), if name.is_some() { ACCENT_SOFT } else if hov { HOVER } else { SURFACE_3 });
+                            p.rect_stroke(r, CornerRadius::same(R_SM), Stroke::new(1.0, if hov { ACCENT } else { BORDER_SUBTLE }), StrokeKind::Inside);
+                            p.text(pos2(r.center().x, r.top() + 15.0), Align2::CENTER_CENTER, format!("{}", i + 1), theme::font("title"), if name.is_some() { ACCENT_TEXT } else { TEXT });
+                            let sub = name.clone().map(|s| s.trim_start_matches("Gift ").chars().take(8).collect::<String>()).unwrap_or(key);
+                            p.text(pos2(r.center().x, r.bottom() - 11.0), Align2::CENTER_CENTER, sub, theme::font("small"), TEXT_FAINT);
+                            if resp.clicked() {
+                                action = Some(("place", i));
+                            }
+                        }
+                    });
+                    ui.add_space(12.0);
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 8.0;
+                        if widgets::secondary_button(ui, None, "Back", can_back).on_hover_text("Undo the last placement (Backspace)").clicked() {
+                            action = Some(("back", 0));
+                        }
+                        if !done && widgets::secondary_button(ui, None, "Skip", can_skip).on_hover_text("Place this gift later").clicked() {
+                            action = Some(("skip", 0));
+                        }
+                        if widgets::secondary_button(ui, None, "Cancel", true).on_hover_text("Esc").clicked() {
+                            action = Some(("cancel", 0));
+                        }
+                        if done && widgets::primary_button(ui, None, "Save order", true).on_hover_text("Enter").clicked() {
+                            action = Some(("save", 0));
+                        }
+                    });
+                });
+        });
+    match action {
+        Some(("place", i)) => { if let Some(w) = &mut app.stage_page.order { w.place(i) } }
+        Some(("back", _)) => { if let Some(w) = &mut app.stage_page.order { w.back() } }
+        Some(("skip", _)) => { if let Some(w) = &mut app.stage_page.order { w.skip() } }
+        Some(("cancel", _)) => app.stage_page.order = None,
+        Some(("save", _)) => save_order(app),
+        _ => {}
+    }
+}
+
+/// Blink the selected gifts (or all) one after the other, ordered left to
+/// right on the stage (then front to back), to match the boxes in the room.
+/// Stops a running sequence.
+pub fn blink_in_sequence(app: &mut App) {
+    if app.blink_seq.is_some() {
+        app.blink_sequence(Vec::new());
+        return;
+    }
+    let mut uids: Vec<Uid> = if app.selection.is_empty() {
+        app.snap.gifts.iter().filter(|g| g.online).map(|g| g.uid).collect()
+    } else {
+        app.selection.iter().copied().collect()
+    };
+    let pos = |u: &Uid| app.persist.stage_positions.get(&u.to_hex()).map(|p| (p[0], p[1])).unwrap_or((f32::MAX, 0.0));
+    uids.sort_by(|a, b| {
+        let (pa, pb) = (pos(a), pos(b));
+        pa.0.total_cmp(&pb.0).then(pa.1.total_cmp(&pb.1))
+    });
+    app.blink_sequence(uids);
 }
 
 #[cfg(test)]
