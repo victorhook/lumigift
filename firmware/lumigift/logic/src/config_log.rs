@@ -84,6 +84,14 @@ pub fn apply_key(c: &mut ConfigRecord, key: u8, value: u16) -> Option<u16> {
             c.channel = value as u8;
             value
         }
+        config_key::VBAT_GAIN => {
+            c.vbat_gain = value as i16;
+            value
+        }
+        config_key::VBAT_OFFSET_MV => {
+            c.vbat_offset_2mv = ((value as i16) / 2).clamp(-127, 127) as i8;
+            (c.vbat_offset_2mv as i16 * 2) as u16
+        }
         _ => return None,
     };
     c.seal();
@@ -93,6 +101,20 @@ pub fn apply_key(c: &mut ConfigRecord, key: u8, value: u16) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vbat_calibration_keys_round_trip() {
+        let mut c = ConfigRecord::defaults(&[7; 12]);
+        assert_eq!(c.calibrate_vbat(1234), 1234, "uncalibrated by default");
+        // Gain -3 % (as i16 bits), offset -25 mV (stored in 2 mV steps).
+        let gain = (-0.03f64 * 32768.0).round() as i16;
+        assert_eq!(apply_key(&mut c, config_key::VBAT_GAIN, gain as u16), Some(gain as u16));
+        assert_eq!(apply_key(&mut c, config_key::VBAT_OFFSET_MV, (-25i16) as u16), Some((-24i16) as u16));
+        let back = ConfigRecord::from_bytes(&c.to_bytes()).expect("valid record");
+        assert_eq!((back.vbat_gain, back.vbat_offset_2mv), (gain, -12));
+        // 1000 mV raw -> 1000 - 30 - 24.
+        assert_eq!(back.calibrate_vbat(1000), 946);
+    }
 
     fn page_with(records: &[[u8; 16]]) -> Vec<[u8; 16]> {
         let mut p = vec![[0xFF; 16]; SLOTS];

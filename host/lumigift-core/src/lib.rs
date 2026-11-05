@@ -73,6 +73,7 @@
 //! # Ok::<(), lumigift_core::LinkError>(())
 //! ```
 
+pub mod calibration;
 mod clock;
 mod config;
 mod link;

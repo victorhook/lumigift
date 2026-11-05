@@ -613,10 +613,11 @@ impl App {
 
     fn measure(&mut self) {
         let m = self.adc.read();
-        self.vbat_mv = m.vbat_mv;
-        self.low_batt = low_battery(self.low_batt, m.vbat_mv);
+        // Uncalibrated gifts (gain and offset 0) report the raw reading.
+        self.vbat_mv = if m.vbat_mv == 0 { 0 } else { self.cfg.current.calibrate_vbat(m.vbat_mv) };
+        self.low_batt = low_battery(self.low_batt, self.vbat_mv);
         // Up by 10 mA per measurement (1 s), down at once.
-        self.led_cap_ma = follow_budget(self.led_cap_ma, battery_led_budget_ma(m.vbat_mv), 10);
+        self.led_cap_ma = follow_budget(self.led_cap_ma, battery_led_budget_ma(self.vbat_mv), 10);
         self.temp_c = m.temp_c;
     }
 

@@ -212,7 +212,12 @@ pub(super) struct SimGift {
     bcast_lost: u16,
     last_bcast_seq: Option<u8>,
     last_show: Option<u64>,
-    vbat0: f32,
+    pub(super) vbat0: f32,
+    /// Measurement error `(gain, offset mV)` and the calibration stored in
+    /// the config (as the firmware applies it).
+    pub(super) vbat_error: (f32, f32),
+    vbat_gain: i16,
+    vbat_offset_2mv: i8,
     temp_c: f32,
     renderer: Renderer,
     pub led_mode: LedMode,
@@ -363,6 +368,9 @@ impl SimGift {
             last_bcast_seq: None,
             last_show: None,
             vbat0: vbat_mv as f32,
+            vbat_error: (1.0, 0.0),
+            vbat_gain: 0,
+            vbat_offset_2mv: 0,
             temp_c: 21.0,
             renderer: Renderer::new(seed),
             led_mode: LedMode::Off,
@@ -1150,12 +1158,23 @@ impl SimGift {
                         ));
                         true
                     }
+                    // As `lumigift_logic::config_log::apply_key`.
+                    config_key::VBAT_GAIN => {
+                        self.vbat_gain = value as i16;
+                        true
+                    }
+                    config_key::VBAT_OFFSET_MV => {
+                        self.vbat_offset_2mv = ((value as i16) / 2).clamp(-127, 127) as i8;
+                        true
+                    }
                     _ => false,
                 };
                 let cur = match key {
                     config_key::MAX_BRIGHTNESS => self.max_brightness as u16,
                     config_key::IDLE_TIMEOUT_MS => self.idle_timeout_ms as u16,
                     config_key::POWER_BUDGET_MA => self.power_budget_ma,
+                    config_key::VBAT_GAIN => self.vbat_gain as u16,
+                    config_key::VBAT_OFFSET_MV => (self.vbat_offset_2mv as i16 * 2) as u16,
                     config_key::CHANNEL => {
                         self.pending_channel
                             .map(|c| c.1)
@@ -1193,7 +1212,9 @@ impl SimGift {
         } else {
             25.0
         };
-        (self.vbat0 - drain_per_hour * hours - sag).max(800.0) as u16
+        let truth = (self.vbat0 - drain_per_hour * hours - sag).max(800.0);
+        let raw = (truth * self.vbat_error.0 + self.vbat_error.1).clamp(0.0, 65535.0) as u16;
+        layout::calibrate_vbat_mv(raw, self.vbat_gain, self.vbat_offset_2mv)
     }
 
     /// Flags the app reports in both `Status` and `Identity`.

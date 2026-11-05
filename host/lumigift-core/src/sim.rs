@@ -83,6 +83,9 @@ pub struct SimGiftConfig {
     pub channel: Option<u8>,
     /// What is wrong with the installed app, if anything.
     pub app_fault: SimAppFault,
+    /// Battery measurement error `(gain, offset mV)`: the gift reads
+    /// `true * gain + offset` before its calibration (default exact).
+    pub vbat_error: (f32, f32),
 }
 
 impl SimGiftConfig {
@@ -99,6 +102,7 @@ impl SimGiftConfig {
             powered: true,
             channel: None,
             app_fault: SimAppFault::None,
+            vbat_error: (1.0, 0.0),
         }
     }
 }
@@ -331,6 +335,7 @@ fn make_gift(c: &SimGiftConfig, image: &[u8], seed: u32, t: u64) -> SimGift {
         .filter(|&ch| ch <= 125)
         .unwrap_or(lp::DEFAULT_CHANNEL);
     g.app_fault = c.app_fault;
+    g.vbat_error = c.vbat_error;
     if c.powered {
         // Pretend the gift has been running for a while already.
         g.start_settled(t, c.start_in_bootloader);
@@ -941,6 +946,11 @@ impl SimHandle {
     /// Reset a gift as if its watchdog fired.
     pub fn reboot(&self, gift: usize) {
         self.at_now(gift, |g, now| g.watchdog_reset(now));
+    }
+
+    /// Set a gift's true supply / cell voltage (e.g. a bench supply).
+    pub fn set_vbat(&self, gift: usize, mv: u16) {
+        lock(&self.world).gifts[gift].vbat0 = mv as f32;
     }
 
     /// Change a gift's node address behind the host's back (e.g. to create a collision).

@@ -121,6 +121,14 @@ impl Default for BootShared {
 
 const _: () = assert!(core::mem::size_of::<BootShared>() == BOOT_SHARED_SIZE as usize);
 
+/// `raw + raw * gain / 32768 + 2 * offset_2mv`, in mV (the battery
+/// calibration stored in [`ConfigRecord`]).
+pub fn calibrate_vbat_mv(raw_mv: u16, gain: i16, offset_2mv: i8) -> u16 {
+    let mv = raw_mv as i32;
+    let v = mv + ((mv * gain as i32) >> 15) + 2 * offset_2mv as i32;
+    v.clamp(0, u16::MAX as i32) as u16
+}
+
 /// One 16-byte record of the config log. The last record whose `magic`
 /// and `crc` match is current; erased slots read all-ones. When the page
 /// is full it is erased and the current record rewritten first.
@@ -133,9 +141,12 @@ pub struct ConfigRecord {
     pub max_brightness: u8,
     pub channel: u8,
     pub idle_timeout_100ms: u8,
-    pub _reserved: u8,
+    /// Battery measurement calibration (0 = none, the bytes were reserved
+    /// and zero before): `mv + mv * vbat_gain / 32768 + 2 * vbat_offset_2mv`,
+    /// see [`ConfigRecord::calibrate_vbat`].
+    pub vbat_offset_2mv: i8,
     pub power_budget_ma: u16,
-    pub _reserved2: [u8; 2],
+    pub vbat_gain: i16,
     /// CRC-32 of the preceding 12 bytes.
     pub crc: u32,
 }
@@ -152,9 +163,9 @@ impl ConfigRecord {
             max_brightness: 160,
             channel: crate::DEFAULT_CHANNEL,
             idle_timeout_100ms: 10,
-            _reserved: 0,
+            vbat_offset_2mv: 0,
             power_budget_ma: 250,
-            _reserved2: [0; 2],
+            vbat_gain: 0,
             crc: 0,
         };
         r.seal();
@@ -169,9 +180,9 @@ impl ConfigRecord {
         b[4] = self.max_brightness;
         b[5] = self.channel;
         b[6] = self.idle_timeout_100ms;
-        b[7] = self._reserved;
+        b[7] = self.vbat_offset_2mv as u8;
         b[8..10].copy_from_slice(&self.power_budget_ma.to_le_bytes());
-        b[10..12].copy_from_slice(&self._reserved2);
+        b[10..12].copy_from_slice(&self.vbat_gain.to_le_bytes());
         b[12..16].copy_from_slice(&self.crc.to_le_bytes());
         b
     }
@@ -184,12 +195,17 @@ impl ConfigRecord {
             max_brightness: b[4],
             channel: b[5],
             idle_timeout_100ms: b[6],
-            _reserved: b[7],
+            vbat_offset_2mv: b[7] as i8,
             power_budget_ma: u16::from_le_bytes([b[8], b[9]]),
-            _reserved2: [b[10], b[11]],
+            vbat_gain: i16::from_le_bytes([b[10], b[11]]),
             crc: u32::from_le_bytes([b[12], b[13], b[14], b[15]]),
         };
         (r.magic == Self::MAGIC && r.crc == r.compute_crc()).then_some(r)
+    }
+
+    /// A raw battery reading (mV) corrected with this gift's calibration.
+    pub fn calibrate_vbat(&self, raw_mv: u16) -> u16 {
+        calibrate_vbat_mv(raw_mv, self.vbat_gain, self.vbat_offset_2mv)
     }
 
     /// Recompute after changing fields.

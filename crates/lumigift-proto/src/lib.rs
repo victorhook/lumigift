@@ -398,6 +398,12 @@ pub mod config_key {
     /// later, so the host can still collect the `ConfigResult`.
     pub const CHANNEL: u8 = 4;
     pub const CHANNEL_SWITCH_DELAY_MS: u32 = 1000;
+    /// Battery measurement gain correction, an `i16` sent as its `u16` bits:
+    /// `mv * value / 32768` is added (see `ConfigRecord::calibrate_vbat`).
+    pub const VBAT_GAIN: u8 = 5;
+    /// Battery measurement offset in mV, an `i16` sent as its `u16` bits,
+    /// stored in 2 mV steps (±254 mV).
+    pub const VBAT_OFFSET_MV: u8 = 6;
 }
 
 /// Low-power doze. A dozing gift keeps its LEDs off, its nRF in standby and

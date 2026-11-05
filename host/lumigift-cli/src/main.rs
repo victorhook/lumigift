@@ -130,6 +130,17 @@ enum Cmd {
     Sleep,
     /// Wake dozing gifts (a ~1.3 s Wake burst, then a scan) and list them.
     Wake,
+    /// Calibrate one gift's battery measurement with a bench supply: it asks
+    /// for two supply voltages and stores the correction on the gift.
+    /// Service command (hidden from --help).
+    #[command(hide = true)]
+    CalibrateVbat {
+        /// The gift powered from the supply: s3 (slot), a UID prefix or a name.
+        gift: String,
+        /// Only clear the gift's calibration.
+        #[arg(long)]
+        reset: bool,
+    },
     /// Show one colour on every slot until Ctrl-C (or --seconds).
     Solid {
         color: String,
@@ -264,6 +275,7 @@ fn run(cli: Cli) -> Res {
             println!("{n} gift(s) online");
             print_table(&link.snapshot(), sim.as_ref());
         }
+        Cmd::CalibrateVbat { gift, reset } => calibrate_vbat(&link, &gift, reset)?,
         Cmd::Solid { color, seconds } => {
             let c = parse_color(&color)?;
             link.set_show(ShowOutput::Solid(vec![c; proto::MAX_SLOTS as usize]));
@@ -434,6 +446,76 @@ fn single(link: &Link, sel: &str) -> Res<Uid> {
             v.len()
         )),
     }
+}
+
+/// `calibrate-vbat`: two-point battery measurement calibration (see
+/// `lumigift_core::calibration`).
+fn calibrate_vbat(link: &Link, sel: &str, reset: bool) -> Res {
+    use std::io::Write;
+    let uid = single(link, sel)?;
+    let set = |key: u8, value: i16| -> Res {
+        let r = link.set_config(Target::Gifts(vec![uid]), key, value as u16).wait().map_err(e)?;
+        if r.ok.contains(&uid) { Ok(()) } else { Err(format!("the gift did not take the setting: {r}")) }
+    };
+    // Raw readings: clear any earlier calibration first.
+    set(config_key::VBAT_GAIN, 0)?;
+    set(config_key::VBAT_OFFSET_MV, 0)?;
+    if reset {
+        println!("calibration cleared");
+        return Ok(());
+    }
+    // Average the gift's own readings (it measures every 100 ms; the host
+    // polls it several times a second). LEDs stay off (no show is sent).
+    let measure = || -> Res<(f64, f64)> {
+        std::thread::sleep(Duration::from_secs(3));
+        let mut v = Vec::new();
+        let end = Instant::now() + Duration::from_secs(4);
+        while Instant::now() < end {
+            if let Some(g) = link.snapshot().gifts.iter().find(|g| g.uid == uid && g.online) {
+                v.push(g.vbat_mv as f64);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        if v.len() < 10 {
+            return Err("the gift stopped answering".into());
+        }
+        let mean = v.iter().sum::<f64>() / v.len() as f64;
+        let spread = v.iter().fold(0f64, |m, x| m.max((x - mean).abs()));
+        Ok((mean, spread))
+    };
+    let ask = |which: &str| -> Res<f64> {
+        loop {
+            print!("Set the supply to the {which} voltage, then type it in volts (e.g. 1.20): ");
+            std::io::stdout().flush().ok();
+            let mut line = String::new();
+            if std::io::stdin().read_line(&mut line).map_err(e)? == 0 {
+                return Err("cancelled".into());
+            }
+            match line.trim().replace(',', ".").parse::<f64>() {
+                Ok(v) if (0.5..=2.0).contains(&v) => return Ok(v * 1000.0),
+                _ => println!("  expected a voltage between 0.5 and 2.0 V"),
+            }
+        }
+    };
+    println!("Calibrating {} (LEDs stay off). Use two voltages at least 0.2 V apart, e.g. 1.0 V and 1.5 V.", link.snapshot().gifts.iter().find(|g| g.uid == uid).map(|g| g.meta.name.clone().unwrap_or_else(|| g.uid.short())).unwrap_or_default());
+    let mut points = Vec::new();
+    for which in ["first", "second"] {
+        let truth = ask(which)?;
+        print!("  measuring…");
+        std::io::stdout().flush().ok();
+        let (raw, spread) = measure()?;
+        println!(" the gift reads {raw:.0} mV (±{spread:.0}) at {truth:.0} mV");
+        points.push((raw, truth));
+    }
+    let (gain, offset) = lumigift_core::calibration::vbat_calibration(points[0], points[1])?;
+    set(config_key::VBAT_GAIN, gain)?;
+    set(config_key::VBAT_OFFSET_MV, offset)?;
+    println!("stored: gain {:+.2} %, offset {offset:+} mV", gain as f64 / 327.68);
+    print!("  checking…");
+    std::io::stdout().flush().ok();
+    let (now, _) = measure()?;
+    println!(" the gift now reads {now:.0} mV at {:.0} mV", points[1].1);
+    Ok(())
 }
 
 fn report(r: Result<CmdReport, LinkError>) -> Res {
