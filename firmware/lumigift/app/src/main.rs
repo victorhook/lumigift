@@ -25,7 +25,7 @@ use lumigift_board::power;
 use lumigift_board::radio::{self, PIPE_UNICAST, Radio};
 use lumigift_board::{self as board, gpio, iwdg, sys, time};
 use lumigift_fx::{Renderer, gamma, hsv, power_limit, scale8};
-use lumigift_logic::adc::low_battery;
+use lumigift_logic::adc::{battery_led_budget_ma, follow_budget, low_battery};
 use lumigift_logic::blink::Blink;
 use lumigift_logic::config_log::apply_key;
 use lumigift_logic::recovery::REPLY_POLLS;
@@ -125,6 +125,8 @@ struct App {
     leds_active: bool,
 
     vbat_mv: u16,
+    /// LED budget the battery allows (mA at 5 V), see `battery_led_budget_ma`.
+    led_cap_ma: u16,
     low_batt: bool,
     temp_c: i8,
 
@@ -203,6 +205,7 @@ fn main() -> ! {
         blink: None,
         leds_active: false,
         vbat_mv: 0,
+        led_cap_ma: u16::MAX,
         low_batt: false,
         temp_c: 0,
         pending: None,
@@ -612,6 +615,8 @@ impl App {
         let m = self.adc.read();
         self.vbat_mv = m.vbat_mv;
         self.low_batt = low_battery(self.low_batt, m.vbat_mv);
+        // Up by 10 mA per measurement (1 s), down at once.
+        self.led_cap_ma = follow_budget(self.led_cap_ma, battery_led_budget_ma(m.vbat_mv), 10);
         self.temp_c = m.temp_c;
     }
 
@@ -659,7 +664,7 @@ impl App {
             }
         }
 
-        power_limit(&mut px, cfg.power_budget_ma);
+        power_limit(&mut px, cfg.power_budget_ma.min(self.led_cap_ma));
         for p in px.iter_mut() {
             *p = scale8(gamma(*p), cfg.max_brightness);
         }

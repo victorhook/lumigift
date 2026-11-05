@@ -47,6 +47,37 @@ pub fn temp_c(ts_raw: u16, vdda_mv: u32, ts_cal1: u16) -> i8 {
     (30 + (v_uv - v30_uv) / TS_SLOPE_UV_PER_C as i64).clamp(-128, 127) as i8
 }
 
+/// LED budget in mA at 5 V that a cell at `vbat_mv` (measured under load)
+/// can feed without browning out: the current an AAA cell can deliver (~700
+/// mA fresh, ~60 mA nearly flat) times its voltage, through the ~80 %
+/// efficient boost converter. The configured budget (250 mA at 5 V by
+/// default) would need ~1 A from the cell, which browned out a gift on a
+/// 0.8 V cell into recovery. `0` (not measured yet) means no limit.
+pub fn battery_led_budget_ma(vbat_mv: u16) -> u16 {
+    // (cell mV, cell mA it can sustain)
+    const CURVE: [(u32, u32); 6] = [(800, 60), (900, 150), (1000, 250), (1100, 350), (1200, 450), (1350, 700)];
+    if vbat_mv == 0 {
+        return u16::MAX;
+    }
+    let v = vbat_mv as u32;
+    let i = match CURVE.iter().position(|&(cv, _)| v < cv) {
+        Some(0) => CURVE[0].1,
+        Some(k) => {
+            let ((v0, i0), (v1, i1)) = (CURVE[k - 1], CURVE[k]);
+            i0 + (i1 - i0) * (v - v0) / (v1 - v0)
+        }
+        None => CURVE[CURVE.len() - 1].1,
+    };
+    (v * i * 4 / 5 / 5000) as u16
+}
+
+/// Track the battery budget: down at once, up by at most `step` per call (the
+/// voltage is measured under the very load it limits; following it upwards
+/// at once would make the LEDs pump).
+pub fn follow_budget(cap: u16, target: u16, step: u16) -> u16 {
+    if target <= cap { target } else { cap.saturating_add(step).min(target) }
+}
+
 /// Low-battery flag with hysteresis.
 pub fn low_battery(prev: bool, vbat_mv: u16) -> bool {
     if prev { vbat_mv < LOW_BATTERY_CLEAR_MV } else { vbat_mv < LOW_BATTERY_MV }
@@ -70,6 +101,30 @@ mod tests {
         assert!(low_battery(true, 1020));
         assert!(!low_battery(true, 1060));
         assert!(!low_battery(false, 1020));
+    }
+
+    #[test]
+    fn battery_budget() {
+        assert_eq!(battery_led_budget_ma(0), u16::MAX);
+        // Fresh alkaline / bench supply: ~150 mA at 5 V.
+        let fresh = battery_led_budget_ma(1450);
+        assert!((140..=170).contains(&fresh), "{fresh}");
+        let half = battery_led_budget_ma(1150);
+        assert!((60..=80).contains(&half), "{half}");
+        // Nearly flat: barely glowing instead of browning out.
+        assert!(battery_led_budget_ma(800) < 10);
+        assert!(battery_led_budget_ma(700) < 10);
+        // Monotonic.
+        let mut prev = 0;
+        for mv in (700..1600).step_by(10) {
+            let b = battery_led_budget_ma(mv);
+            assert!(b >= prev, "{mv}: {b} < {prev}");
+            prev = b;
+        }
+        // Down at once, up slowly.
+        assert_eq!(follow_budget(150, 40, 10), 40);
+        assert_eq!(follow_budget(40, 150, 10), 50);
+        assert_eq!(follow_budget(145, 150, 10), 150);
     }
 
     #[test]

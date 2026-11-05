@@ -1283,7 +1283,10 @@ impl SimGift {
         for c in &mut out {
             *c = lumigift_fx::scale8(*c, self.max_brightness);
         }
-        lumigift_fx::power_limit(&mut out, self.power_budget_ma);
+        // Like the firmware: the battery caps the LED budget (the firmware
+        // also smooths the cap upwards; the model's voltage is smooth anyway).
+        let cap = lumigift_logic::adc::battery_led_budget_ma(self.vbat(t, w.drain));
+        lumigift_fx::power_limit(&mut out, self.power_budget_ma.min(cap));
         out
     }
 
