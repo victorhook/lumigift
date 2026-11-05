@@ -96,6 +96,13 @@ fn main() -> eframe::Result {
     let native = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title("Lumigift Studio")
+            // Matches the launcher's StartupWMClass (install-desktop.sh), so
+            // the dock groups the window with its icon.
+            .with_app_id("lumigift-studio")
+            .with_icon(
+                eframe::icon_data::from_png_bytes(include_bytes!("../assets/lumigift-studio.png"))
+                    .unwrap_or_default(),
+            )
             .with_inner_size([1600.0, 1000.0])
             .with_min_inner_size([1024.0, 640.0]),
         renderer: eframe::Renderer::Wgpu,
