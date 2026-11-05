@@ -6,6 +6,7 @@
 
 mod app;
 mod backend;
+mod calibrate;
 mod fonts;
 mod health;
 mod icons;

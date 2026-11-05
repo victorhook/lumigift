@@ -787,6 +787,10 @@ pub fn handle_dropped_files(app: &mut App, ctx: &egui::Context) {
 // ---------------------------------------------------------------------------
 
 fn shortcuts(app: &mut App, ui: &mut Ui) {
+    // The latency calibration takes Space for its taps.
+    if app.calib.is_some() {
+        return;
+    }
     let ctx = ui.ctx().clone();
     let c = Modifiers::COMMAND;
     let cs = Modifiers::COMMAND | Modifiers::SHIFT;
@@ -1160,6 +1164,11 @@ fn toolbar(app: &mut App, ui: &mut Ui) {
                     app.persist.latency_ms = app.persist.default_latency_ms;
                 }
                 s.on_hover_text("Radio + render latency of the real gifts when LIVE. Increase if the gifts light up late. The preview and the simulator compensate automatically. Double-click to reset.");
+                let real = app.backend.is_some() && !app.is_sim();
+                let tip = if real { "Calibrate: tap along to clicks, then to flashes" } else { "Calibration needs real gifts (the simulator needs none)" };
+                if widgets::ghost_button(ui, icons::METRONOME, tip, None).clicked() && real {
+                    app.start_calibration();
+                }
                 widgets::text(ui, format!("{}  Latency", icons::TIMER), "small_medium", TEXT_MUTED);
             }
         });

@@ -156,6 +156,8 @@ pub enum Confirm {
 }
 
 pub struct App {
+    /// Latency calibration dialog (owns the show output while flashing).
+    pub calib: Option<crate::calibrate::Calibration>,
     pub persist: Persist,
     pub backend: Option<Backend>,
     pub detector: Detector,
@@ -246,6 +248,7 @@ impl App {
         }
         let stage_preview = Stage::new(rs);
         let mut app = Self {
+            calib: None,
             studio: Studio::new(&persist),
             persist,
             backend,
@@ -306,6 +309,36 @@ impl App {
 
     pub fn link(&self) -> Option<&Arc<lumigift_core::Link>> {
         self.backend.as_ref().map(|b| &b.link)
+    }
+
+    /// Open the latency calibration (pauses the song: the calibration plays
+    /// its own clicks and owns the gifts' output while flashing).
+    pub fn start_calibration(&mut self) {
+        if self.studio.is_playing() {
+            self.studio.toggle_play();
+        }
+        self.calib = Some(crate::calibrate::Calibration::new(self.persist.audio_device.clone()));
+    }
+
+    fn calibration_overlay(&mut self, ctx: &egui::Context) {
+        let Some(c) = self.calib.as_mut() else { return };
+        let outcome = c.ui(ctx);
+        let done = match outcome {
+            crate::calibrate::Outcome::Open => false,
+            crate::calibrate::Outcome::Closed => true,
+            crate::calibrate::Outcome::Apply(ms) => {
+                self.persist.latency_ms = ms;
+                self.toasts.success(format!("Latency set to {ms:.0} ms"));
+                true
+            }
+        };
+        if done {
+            let was_flashing = self.calib.take().is_some_and(|c| c.drives_lights());
+            // Leave the gifts dark unless the normal pipeline takes over.
+            if was_flashing && let Some(b) = self.backend.as_ref() {
+                b.link.set_show(lumigift_core::ShowOutput::Idle);
+            }
+        }
     }
 
     pub fn is_sim(&self) -> bool {
@@ -605,9 +638,14 @@ impl App {
         let display_dt = ctx.input(|i| i.predicted_dt) as f64;
         let frames = self.studio.tick(&self.persist, slots, display_dt, radio_path);
         let frame = frames.map(|f| f.preview);
+        // The latency calibration's flashes own the output while they run.
+        let calibrating = self.calib.as_ref().is_some_and(|c| c.drives_lights());
+        if let (Some(c), Some(b)) = (self.calib.as_mut(), self.backend.as_ref()) {
+            c.drive(&b.link);
+        }
         if let Some(link) = self.backend.as_ref().map(|b| b.link.clone()) {
             let out = crate::backend::show_output(self.blackout, self.live, frames.and_then(|f| f.radio));
-            if self.live || self.blackout {
+            if (self.live || self.blackout) && !calibrating {
                 link.set_show(out);
             }
         }
@@ -622,7 +660,9 @@ impl App {
         let snap = self.snap.clone();
         self.lights.update(&snap, self.backend.as_ref(), src, self.blink_color);
         // Lighting page output (ownership rules in pages/lighting.rs).
-        crate::pages::lighting::drive(self);
+        if !calibrating {
+            crate::pages::lighting::drive(self);
+        }
 
         let dt = ctx.input(|i| i.unstable_dt).max(1e-4);
         self.fps = self.fps * 0.95 + (1.0 / dt) * 0.05;
@@ -1335,6 +1375,7 @@ impl eframe::App for App {
         }
         self.modals(&ctx);
         self.cheatsheet_overlay(&ctx);
+        self.calibration_overlay(&ctx);
         self.handle_palette(&ctx);
         if let Some(id) = self.toasts.show(&ctx, if self.performance { 0.0 } else { STATUS_BAR_H })
             && Some(id) == self.switch_hw_toast {

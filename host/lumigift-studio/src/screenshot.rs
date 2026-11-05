@@ -27,7 +27,7 @@ pub struct Screenshotter {
     steps: Vec<&'static str>,
 }
 
-const STEPS: &[&str] = &["fleet", "fleet-list", "studio", "lighting", "lighting-groups", "stage", "stage-arrange", "firmware", "firmware-run", "settings", "palette", "fleet-compact", "perform", "fleet-asleep"];
+const STEPS: &[&str] = &["fleet", "fleet-list", "studio", "lighting", "lighting-groups", "stage", "stage-arrange", "firmware", "firmware-run", "settings", "palette", "fleet-compact", "perform", "fleet-asleep", "calibrate"];
 
 impl Screenshotter {
     pub fn new(dir: PathBuf) -> Self {
@@ -161,6 +161,10 @@ fn setup(app: &mut App, ctx: &egui::Context, name: &str) {
         "palette" => {
             app.set_page(Page::Fleet);
             app.palette.open();
+        }
+        "calibrate" => {
+            app.set_page(Page::Studio);
+            app.calib = Some(crate::calibrate::Calibration::new(None));
         }
         "perform" => {
             app.set_page(Page::Studio);
