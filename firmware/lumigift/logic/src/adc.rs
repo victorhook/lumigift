@@ -78,6 +78,20 @@ pub fn follow_budget(cap: u16, target: u16, step: u16) -> u16 {
     if target <= cap { target } else { cap.saturating_add(step).min(target) }
 }
 
+/// Battery voltage filter: an exponential average in mV x 8 (alpha 1/8,
+/// ~0.8 s at 10 readings/s). Single readings swing by ±150 mV with the boost
+/// converter's pulsed load, which made the LED cap (and the LEDs) pump. The
+/// first reading (or the first after a 0 = no reading) is taken as is.
+pub fn filter_vbat(prev_x8: u32, mv: u16) -> u32 {
+    if mv == 0 {
+        0
+    } else if prev_x8 == 0 {
+        mv as u32 * 8
+    } else {
+        prev_x8 - prev_x8 / 8 + mv as u32
+    }
+}
+
 /// Low-battery flag with hysteresis.
 pub fn low_battery(prev: bool, vbat_mv: u16) -> bool {
     if prev { vbat_mv < LOW_BATTERY_CLEAR_MV } else { vbat_mv < LOW_BATTERY_MV }
@@ -101,6 +115,23 @@ mod tests {
         assert!(low_battery(true, 1020));
         assert!(!low_battery(true, 1060));
         assert!(!low_battery(false, 1020));
+    }
+
+    #[test]
+    fn vbat_filter_smooths() {
+        let mut f = filter_vbat(0, 1500);
+        assert_eq!(f / 8, 1500);
+        // Alternating ±150 mV readings settle within a few mV of the mean.
+        for i in 0..100 {
+            f = filter_vbat(f, if i % 2 == 0 { 1350 } else { 1650 });
+        }
+        assert!((f / 8).abs_diff(1500) <= 20, "{}", f / 8);
+        // A real drop comes through within ~2 s (20 readings).
+        for _ in 0..20 {
+            f = filter_vbat(f, 1000);
+        }
+        assert!(f / 8 < 1050, "{}", f / 8);
+        assert_eq!(filter_vbat(f, 0), 0);
     }
 
     #[test]

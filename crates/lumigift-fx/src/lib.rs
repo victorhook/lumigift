@@ -797,10 +797,12 @@ pub fn power_limit(leds: &mut [Rgb], budget_ma: u16) {
         .map(|c| c.r as u32 + c.g as u32 + c.b as u32)
         .sum();
     let quiescent = leds.len() as u32;
-    let draw = sum * 20 / 255 + quiescent;
+    let led_ma = sum * 20 / 255;
     let budget = (budget_ma as u32).max(quiescent + 1);
-    if draw > budget {
-        let s = ((budget - quiescent) * 255 * 256 / (sum * 20 / 255 * 255).max(1)).min(255 * 256);
+    if led_ma + quiescent > budget {
+        // Scale factor in 1/(255*256) units: the share of the LED draw the
+        // budget allows.
+        let s = ((budget - quiescent) * 255 * 256 / led_ma.max(1)).min(255 * 256);
         for c in leds {
             c.r = (c.r as u32 * s / (255 * 256)) as u8;
             c.g = (c.g as u32 * s / (255 * 256)) as u8;
@@ -1309,7 +1311,16 @@ mod tests {
             .iter()
             .map(|c| c.r as u32 + c.g as u32 + c.b as u32)
             .sum();
-        assert!(sum * 20 / 255 + 4 <= 101, "draw {}", sum * 20 / 255 + 4);
+        let draw = sum * 20 / 255 + 4;
+        // Scaled down to the budget, not far below it (it once went black).
+        assert!((95..=101).contains(&draw), "draw {draw}");
+        for budget in [20u16, 60, 170, 240] {
+            let mut leds = [Rgb::new(255, 255, 255); 4];
+            power_limit(&mut leds, budget);
+            let sum: u32 = leds.iter().map(|c| c.r as u32 + c.g as u32 + c.b as u32).sum();
+            let draw = sum * 20 / 255 + 4;
+            assert!(draw <= budget as u32 + 1 && draw + 3 >= budget as u32, "budget {budget}: draw {draw}");
+        }
         let mut dim = [Rgb::new(10, 0, 0); 4];
         power_limit(&mut dim, 100);
         assert_eq!(dim, [Rgb::new(10, 0, 0); 4]);

@@ -25,7 +25,7 @@ use lumigift_board::power;
 use lumigift_board::radio::{self, PIPE_UNICAST, Radio};
 use lumigift_board::{self as board, gpio, iwdg, sys, time};
 use lumigift_fx::{Renderer, gamma, hsv, power_limit, scale8};
-use lumigift_logic::adc::{battery_led_budget_ma, follow_budget, low_battery};
+use lumigift_logic::adc::{battery_led_budget_ma, filter_vbat, follow_budget, low_battery};
 use lumigift_logic::blink::Blink;
 use lumigift_logic::config_log::apply_key;
 use lumigift_logic::recovery::REPLY_POLLS;
@@ -44,7 +44,8 @@ use crate::ws2812::Ws2812;
 const FRAME_MS: u32 = 10;
 const HEALTHY_AFTER_MS: u32 = 5000;
 const BOOT_ANIM_MS: u32 = 700;
-const ADC_PERIOD_MS: u32 = 1000;
+/// Battery/temperature reading period (the battery value is filtered).
+const ADC_PERIOD_MS: u32 = 100;
 const RADIO_CHECK_MS: u32 = 1000;
 const STATUS_REFRESH_MS: u32 = 100;
 const RADIO_POLL_MS: u32 = 10;
@@ -125,6 +126,8 @@ struct App {
     leds_active: bool,
 
     vbat_mv: u16,
+    /// Filter state for `vbat_mv` (mV x 8, see `filter_vbat`).
+    vbat_x8: u32,
     /// LED budget the battery allows (mA at 5 V), see `battery_led_budget_ma`.
     led_cap_ma: u16,
     low_batt: bool,
@@ -205,6 +208,7 @@ fn main() -> ! {
         blink: None,
         leds_active: false,
         vbat_mv: 0,
+        vbat_x8: 0,
         led_cap_ma: u16::MAX,
         low_batt: false,
         temp_c: 0,
@@ -614,10 +618,13 @@ impl App {
     fn measure(&mut self) {
         let m = self.adc.read();
         // Uncalibrated gifts (gain and offset 0) report the raw reading.
-        self.vbat_mv = if m.vbat_mv == 0 { 0 } else { self.cfg.current.calibrate_vbat(m.vbat_mv) };
+        let mv = if m.vbat_mv == 0 { 0 } else { self.cfg.current.calibrate_vbat(m.vbat_mv) };
+        self.vbat_x8 = filter_vbat(self.vbat_x8, mv);
+        self.vbat_mv = (self.vbat_x8 / 8) as u16;
         self.low_batt = low_battery(self.low_batt, self.vbat_mv);
-        // Up by 10 mA per measurement (1 s), down at once.
-        self.led_cap_ma = follow_budget(self.led_cap_ma, battery_led_budget_ma(self.vbat_mv), 10);
+        // Up by 1 mA per measurement (10 mA/s), down at once (the filtered
+        // voltage moves smoothly, so this is a gradual dim, not a step).
+        self.led_cap_ma = follow_budget(self.led_cap_ma, battery_led_budget_ma(self.vbat_mv), 1);
         self.temp_c = m.temp_c;
     }
 
@@ -665,7 +672,7 @@ impl App {
             }
         }
 
-        power_limit(&mut px, cfg.power_budget_ma.min(self.led_cap_ma));
+        power_limit(&mut px, self.led_cap_ma);
         for p in px.iter_mut() {
             *p = scale8(gamma(*p), cfg.max_brightness);
         }
