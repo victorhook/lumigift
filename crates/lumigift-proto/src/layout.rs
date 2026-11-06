@@ -145,7 +145,8 @@ pub struct ConfigRecord {
     /// and zero before): `mv + mv * vbat_gain / 32768 + 2 * vbat_offset_2mv`,
     /// see [`ConfigRecord::calibrate_vbat`].
     pub vbat_offset_2mv: i8,
-    pub power_budget_ma: u16,
+    /// Unused (was the LED power budget; the battery cap replaced it).
+    pub reserved: u16,
     pub vbat_gain: i16,
     /// CRC-32 of the preceding 12 bytes.
     pub crc: u32,
@@ -164,7 +165,7 @@ impl ConfigRecord {
             channel: crate::DEFAULT_CHANNEL,
             idle_timeout_100ms: 10,
             vbat_offset_2mv: 0,
-            power_budget_ma: 250,
+            reserved: 0,
             vbat_gain: 0,
             crc: 0,
         };
@@ -181,7 +182,7 @@ impl ConfigRecord {
         b[5] = self.channel;
         b[6] = self.idle_timeout_100ms;
         b[7] = self.vbat_offset_2mv as u8;
-        b[8..10].copy_from_slice(&self.power_budget_ma.to_le_bytes());
+        b[8..10].copy_from_slice(&self.reserved.to_le_bytes());
         b[10..12].copy_from_slice(&self.vbat_gain.to_le_bytes());
         b[12..16].copy_from_slice(&self.crc.to_le_bytes());
         b
@@ -196,7 +197,7 @@ impl ConfigRecord {
             channel: b[5],
             idle_timeout_100ms: b[6],
             vbat_offset_2mv: b[7] as i8,
-            power_budget_ma: u16::from_le_bytes([b[8], b[9]]),
+            reserved: u16::from_le_bytes([b[8], b[9]]),
             vbat_gain: i16::from_le_bytes([b[10], b[11]]),
             crc: u32::from_le_bytes([b[12], b[13], b[14], b[15]]),
         };

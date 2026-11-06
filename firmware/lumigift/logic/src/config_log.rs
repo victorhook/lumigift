@@ -12,8 +12,6 @@ use lumigift_proto::{MAX_SLOTS, UNASSIGNED_SLOT, config_key, valid_node_addr};
 pub const SLOTS: usize = CONFIG_SIZE as usize / ConfigRecord::SIZE;
 
 /// Smallest accepted power budget (the four LEDs' quiescent draw is ~4 mA).
-pub const MIN_POWER_BUDGET_MA: u16 = 20;
-pub const MAX_POWER_BUDGET_MA: u16 = 2000;
 /// Highest nRF24 channel.
 pub const MAX_CHANNEL: u8 = 125;
 
@@ -56,7 +54,6 @@ pub fn sanitize(mut c: ConfigRecord, defaults: &ConfigRecord) -> ConfigRecord {
         c.channel = defaults.channel;
     }
     c.idle_timeout_100ms = c.idle_timeout_100ms.max(1);
-    c.power_budget_ma = c.power_budget_ma.clamp(MIN_POWER_BUDGET_MA, MAX_POWER_BUDGET_MA);
     c.seal();
     c
 }
@@ -72,10 +69,6 @@ pub fn apply_key(c: &mut ConfigRecord, key: u8, value: u16) -> Option<u16> {
         config_key::IDLE_TIMEOUT_MS => {
             c.idle_timeout_100ms = (value / 100).clamp(1, 255) as u8;
             c.idle_timeout_100ms as u16 * 100
-        }
-        config_key::POWER_BUDGET_MA => {
-            c.power_budget_ma = value.clamp(MIN_POWER_BUDGET_MA, MAX_POWER_BUDGET_MA);
-            c.power_budget_ma
         }
         config_key::CHANNEL => {
             if value > MAX_CHANNEL as u16 {
@@ -159,7 +152,7 @@ mod tests {
         assert_eq!(apply_key(&mut c, config_key::MAX_BRIGHTNESS, 999), Some(255));
         assert_eq!(apply_key(&mut c, config_key::IDLE_TIMEOUT_MS, 30_000), Some(25_500));
         assert_eq!(apply_key(&mut c, config_key::IDLE_TIMEOUT_MS, 50), Some(100));
-        assert_eq!(apply_key(&mut c, config_key::POWER_BUDGET_MA, 1), Some(MIN_POWER_BUDGET_MA));
+        assert_eq!(apply_key(&mut c, 3, 250), None, "power budget key is gone");
         assert_eq!(apply_key(&mut c, config_key::CHANNEL, 126), None);
         assert_eq!(apply_key(&mut c, config_key::CHANNEL, 90), Some(90));
         assert_eq!(apply_key(&mut c, 99, 1), None);
@@ -174,13 +167,11 @@ mod tests {
         c.slot = 200;
         c.channel = 200;
         c.idle_timeout_100ms = 0;
-        c.power_budget_ma = 0;
         let s = sanitize(c, &d);
         assert_eq!(s.node_addr, d.node_addr);
         assert_eq!(s.slot, UNASSIGNED_SLOT);
         assert_eq!(s.channel, d.channel);
         assert_eq!(s.idle_timeout_100ms, 1);
-        assert_eq!(s.power_budget_ma, MIN_POWER_BUDGET_MA);
         assert!(ConfigRecord::from_bytes(&s.to_bytes()).is_some());
     }
 }

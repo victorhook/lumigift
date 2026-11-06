@@ -200,9 +200,11 @@ peripheral). The 98-byte frame starts and ends with a 0 duty; the trailing
 Per frame (100 Hz): `Renderer::render` (Music) or the direct colours
 (Solid/Leds/Blackout), an idle fade (show content fades out ~250 ms after
 `idle_timeout` without show frames; the renderer additionally fades Music
-by itself after 600 ms), then `power_limit(budget)`, `gamma`, and the
+by itself after 600 ms), then `power_limit(battery cap)`, `gamma`, and the
 `max_brightness` cap, in that order. Because gamma and the cap only lower
-values, the power budget still holds for what is sent. `Blink` overrides
+values, the battery cap still holds for what is sent. The cap
+(`battery_led_budget_ma`) is what the cell can deliver at its measured
+voltage; there is no configured power budget. `Blink` overrides
 the LEDs with its colour (count × period, on for the first half), then the
 show resumes. A 0.7 s rainbow boot animation runs until the first show frame.
 
@@ -296,8 +298,9 @@ Append-only 16-byte `ConfigRecord`s in the config page; the last valid
 record wins, torn writes are skipped, a full page is erased and the record
 rewritten at slot 0. Missing record → `ConfigRecord::defaults(uid)`.
 `SetConfig` keys: `MAX_BRIGHTNESS` (0-255), `IDLE_TIMEOUT_MS` (stored in
-100 ms units, 100-25 500 ms), `POWER_BUDGET_MA` (20-2000), `CHANNEL`
-(0-125, switches 1 s after the reply). The reply carries the clamped value.
+100 ms units, 100-25 500 ms), `CHANNEL` (0-125, switches 1 s after the
+reply), `VBAT_GAIN` / `VBAT_OFFSET_MV` (battery calibration). Key 3 (the
+old power budget) is rejected. The reply carries the clamped value.
 
 ### VBAT and temperature
 
@@ -328,7 +331,7 @@ Everything here is compiled and unit-tested only; no hardware was attached.
 7. **WS2812B**: scope PA2: 1.25 µs period, T0H ≈ 0.35 µs, T1H ≈ 0.79 µs,
    98 periods per frame then low; colours in GRB order; boot animation.
    Verify the DMAMUX request id 25 = TIM1_UP and that `BDTR.MOE` is set.
-8. **Power**: full white must stay under `power_budget_ma`; watch the boost
+8. **Power**: full white must stay under the battery cap; watch the boost
    converter and the 3.3 V rail for brown-outs of the nRF (health check
    re-inits it).
 9. **Clock sync**: two gifts, Music show: `TIME_SYNCED` set, `sync_err_us`

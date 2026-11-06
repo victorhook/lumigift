@@ -1553,8 +1553,7 @@ About page and the splash. The UI never sets body text in it.
   advertising channels 37/38/39 (2402/2426/2480 MHz) as 1 px `VIZ_SECTION` lines. Changing the channel needs every gift to move,
   but the over-the-air protocol has no channel-change command yet (`config_key` covers brightness, idle timeout and power only).
   Until it does, the channel selector is **disabled with that explanation** and the scan is informational.
-* **Power & brightness**: max brightness cap (0–100%, `config_key::MAX_BRIGHTNESS`), LED power budget (50–400 mA, default 250,
-  `POWER_BUDGET_MA`), idle timeout (1–60 s, `IDLE_TIMEOUT_MS`), the battery chemistry curve (Alkaline / NiMH). `[Apply to all gifts]`
+* **Power & brightness**: max brightness cap (0–100%, `config_key::MAX_BRIGHTNESS`), idle timeout (1–60 s, `IDLE_TIMEOUT_MS`), the battery chemistry curve (Alkaline / NiMH). `[Apply to all gifts]`
   sends `SetConfig` and shows per-gift results (`ConfigResult.ok`) as a small list with checks/failures. Values apply instantly in
   the preview.
 * **Audio**: output device (combo from cpal with "System default" first), `[Test tone]`, and the default latency offset with `[Calibrate…]`.

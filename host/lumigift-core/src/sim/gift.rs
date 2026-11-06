@@ -189,7 +189,6 @@ pub(super) struct SimGift {
     pub stored_channel: u8,
     pub max_brightness: u8,
     pub idle_timeout_ms: u32,
-    pub power_budget_ma: u16,
     // app region
     pub flash: Vec<u8>,
     // RAM that survives warm resets
@@ -348,7 +347,6 @@ impl SimGift {
             stored_channel: lp::DEFAULT_CHANNEL,
             max_brightness: 160,
             idle_timeout_ms: 1000,
-            power_budget_ma: 250,
             flash,
             shared: BootShared::new(),
             mode: Mode::Off,
@@ -1147,10 +1145,6 @@ impl SimGift {
                         self.idle_timeout_ms = value as u32;
                         true
                     }
-                    config_key::POWER_BUDGET_MA if (20..=2000).contains(&value) => {
-                        self.power_budget_ma = value;
-                        true
-                    }
                     config_key::CHANNEL if value <= 125 => {
                         self.pending_channel = Some((
                             t + config_key::CHANNEL_SWITCH_DELAY_MS as u64 * MS,
@@ -1172,7 +1166,6 @@ impl SimGift {
                 let cur = match key {
                     config_key::MAX_BRIGHTNESS => self.max_brightness as u16,
                     config_key::IDLE_TIMEOUT_MS => self.idle_timeout_ms as u16,
-                    config_key::POWER_BUDGET_MA => self.power_budget_ma,
                     config_key::VBAT_GAIN => self.vbat_gain as u16,
                     config_key::VBAT_OFFSET_MV => (self.vbat_offset_2mv as i16 * 2) as u16,
                     config_key::CHANNEL => {
@@ -1307,7 +1300,7 @@ impl SimGift {
         // Like the firmware: the battery caps the LED budget (the firmware
         // also smooths the cap upwards; the model's voltage is smooth anyway).
         let cap = lumigift_logic::adc::battery_led_budget_ma(self.vbat(t, w.drain));
-        lumigift_fx::power_limit(&mut out, self.power_budget_ma.min(cap));
+        lumigift_fx::power_limit(&mut out, cap);
         out
     }
 

@@ -94,7 +94,7 @@ enum Cmd {
         #[arg(long)]
         bootloader: bool,
     },
-    /// Set a config value: max-brightness, idle-timeout (ms), power-budget (mA),
+    /// Set a config value: max-brightness, idle-timeout (ms),
     /// channel (moves gifts and bridge), or a numeric key.
     Config {
         key: String,
@@ -238,7 +238,6 @@ fn run(cli: Cli) -> Res {
             let k = match key.to_ascii_lowercase().replace('_', "-").as_str() {
                 "max-brightness" | "brightness" => config_key::MAX_BRIGHTNESS,
                 "idle-timeout" | "idle-timeout-ms" => config_key::IDLE_TIMEOUT_MS,
-                "power-budget" | "power-budget-ma" => config_key::POWER_BUDGET_MA,
                 "channel" => {
                     let v =
                         u8::try_from(value).map_err(|_| "channel must be 0..=125".to_string())?;

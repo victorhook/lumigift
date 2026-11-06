@@ -15,7 +15,6 @@ pub struct SettingsPage {
     channel: u8,
     channel_init: bool,
     max_brightness: u16,
-    power_ma: u16,
     idle_s: u16,
     apply: Vec<(String, Pending<CmdReport>)>,
     results: Vec<(String, CmdReport)>,
@@ -33,7 +32,6 @@ impl Default for SettingsPage {
             channel: 76,
             channel_init: false,
             max_brightness: 100,
-            power_ma: 250,
             idle_s: 5,
             apply: Vec::new(),
             results: Vec::new(),
@@ -178,15 +176,11 @@ fn results(app: &mut App, ui: &mut Ui) {
 }
 
 fn power(app: &mut App, ui: &mut Ui) {
-    heading(ui, "Power & brightness", "Limits stored on every gift. The power limiter keeps the AAA boost converter happy.");
+    heading(ui, "Power & brightness", "Limits stored on every gift. Each gift also caps its LED power to what its battery can deliver.");
     let s = &mut app.settings;
     row(ui, "Max brightness", |ui| {
         ui.add(egui::Slider::new(&mut s.max_brightness, 0..=100).show_value(false));
         widgets::text(ui, format!("{}%", s.max_brightness), "value", TEXT_SECONDARY);
-    });
-    row(ui, "LED power budget", |ui| {
-        ui.add(egui::Slider::new(&mut s.power_ma, 50..=400).show_value(false).step_by(10.0));
-        widgets::text(ui, format!("{} mA", s.power_ma), "value", TEXT_SECONDARY);
     });
     row(ui, "Idle timeout", |ui| {
         ui.add(egui::Slider::new(&mut s.idle_s, 1..=60).show_value(false));
@@ -208,7 +202,6 @@ fn power(app: &mut App, ui: &mut Ui) {
             let mb = (s.max_brightness as u32 * 255 / 100) as u16;
             let items = [
                 ("Max brightness".to_string(), config_key::MAX_BRIGHTNESS, mb),
-                ("Power budget".to_string(), config_key::POWER_BUDGET_MA, s.power_ma),
                 ("Idle timeout".to_string(), config_key::IDLE_TIMEOUT_MS, s.idle_s * 1000),
             ];
             for (n, k, v) in items {

@@ -396,7 +396,7 @@ fn commands_slots_config_metadata_channel() {
             .all_ok()
     );
     let r = link
-        .set_config(uids[2], config_key::POWER_BUDGET_MA, 5)
+        .set_config(uids[2], 3, 250) // retired key (power budget)
         .wait()
         .unwrap();
     assert!(matches!(r.failed[0].1, LinkError::Rejected(_)));

@@ -391,8 +391,7 @@ pub mod config_key {
     pub const MAX_BRIGHTNESS: u8 = 1;
     /// Turn LEDs off after this many ms without show frames.
     pub const IDLE_TIMEOUT_MS: u8 = 2;
-    /// Power budget for all four LEDs, in mA at 5 V.
-    pub const POWER_BUDGET_MA: u8 = 3;
+    // 3 was the LED power budget, now set by the battery alone.
     /// Radio channel 0..=125 (stored in `ConfigRecord::channel`). The gift
     /// replies on the old channel and switches [`CHANNEL_SWITCH_DELAY_MS`]
     /// later, so the host can still collect the `ConfigResult`.
