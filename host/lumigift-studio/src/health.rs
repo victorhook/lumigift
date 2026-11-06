@@ -398,11 +398,14 @@ pub fn fmt_ago(d: Duration) -> String {
     }
 }
 
-/// fw_version as `YYYY-MM-DD HH:MM` (UTC) if it looks like a timestamp, else `v{n}`.
+/// fw_version (the image's build time) as `YYYY-MM-DD HH:MM` in local time
+/// if it looks like a timestamp, else `v{n}`.
 pub fn fmt_fw(v: u32) -> String {
     if v >= 1_600_000_000 {
-        let (y, mo, d, h, mi) = civil(v as i64);
-        format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}")
+        match jiff::Timestamp::from_second(v as i64) {
+            Ok(t) => t.to_zoned(jiff::tz::TimeZone::system()).strftime("%Y-%m-%d %H:%M").to_string(),
+            Err(_) => format!("v{v}"),
+        }
     } else {
         format!("v{v}")
     }
@@ -411,8 +414,10 @@ pub fn fmt_fw(v: u32) -> String {
 /// Short form for tiles: `10-31` or `v3`.
 pub fn fmt_fw_short(v: u32) -> String {
     if v >= 1_600_000_000 {
-        let (_, mo, d, _, _) = civil(v as i64);
-        format!("{mo:02}-{d:02}")
+        match jiff::Timestamp::from_second(v as i64) {
+            Ok(t) => t.to_zoned(jiff::tz::TimeZone::system()).strftime("%m-%d").to_string(),
+            Err(_) => format!("v{v}"),
+        }
     } else {
         format!("v{v}")
     }

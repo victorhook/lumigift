@@ -6,6 +6,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
+jiff = "0.2"
 lumigift-core = { path = "../lumigift-core" }
 lumigift-audio = { path = "../lumigift-audio" }
 lumigift-proto = { path = "../../crates/lumigift-proto" }

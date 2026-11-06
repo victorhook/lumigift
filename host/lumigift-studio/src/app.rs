@@ -229,6 +229,8 @@ impl App {
         if persist.lighting.master == 0 {
             persist.lighting.master = 255;
         }
+        // Always start on the Fleet page (not wherever the last session ended).
+        persist.page = Page::Fleet;
         cc.egui_ctx.set_zoom_factor(persist.zoom.clamp(0.8, 1.5));
         let detector = Detector::default();
         detector.start(cc.egui_ctx.clone());

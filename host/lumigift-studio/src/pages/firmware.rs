@@ -360,10 +360,12 @@ fn targets(app: &mut App, ui: &mut Ui) {
         let slot = g.slot.map(health::fmt_slot).unwrap_or("—".into());
         p.text(pos2(x, y), Align2::LEFT_CENTER, slot, theme::font("value_small"), TEXT_MUTED);
         x += 52.0;
+        // The installed version is always shown, also for excluded gifts.
+        let cur = if g.in_bootloader { "recovery".to_string() } else { fmt_fw(g.fw_version) };
         let mid = match ex {
-            Exclusion::Offline => ("Offline".to_string(), TEXT_FAINT, None),
-            Exclusion::LowBattery => ("Battery low: excluded".into(), WARN, Some(icons::WARNING)),
-            Exclusion::WeakLink => ("Weak link: excluded".into(), WARN, Some(icons::WARNING)),
+            Exclusion::Offline => (format!("{cur} · offline"), TEXT_FAINT, None),
+            Exclusion::LowBattery => (format!("{cur} · battery low: excluded"), WARN, Some(icons::WARNING)),
+            Exclusion::WeakLink => (format!("{cur} · weak link: excluded"), WARN, Some(icons::WARNING)),
             Exclusion::None => match new_ver {
                 Some(v) if v == g.fw_version && !g.in_bootloader => (format!("{}  same", fmt_fw(g.fw_version)), TEXT_FAINT, None),
                 Some(v) if v < g.fw_version => (format!("{} → {}", fmt_fw(g.fw_version), fmt_fw(v)), WARN, Some(icons::WARNING)),

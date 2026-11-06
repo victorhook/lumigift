@@ -32,6 +32,9 @@ glam = { version = "0.30", features = ["bytemuck"] }
 [profile.release]
 debug = 1
 
-# Keep dependencies (wgpu, symphonia, rustfft) fast in debug builds.
+# Keep dependencies (wgpu, symphonia, rustfft) fast in debug builds, without
+# their debug info (it made every test/example binary huge: target/ reached
+# 125 GB).
 [profile.dev.package."*"]
 opt-level = 2
+debug = false
